@@ -1,0 +1,117 @@
+{
+  "P_MIN": -12.5,
+  "P_MAX": 12.5,
+  "V_MIN": -30.0,
+  "V_MAX": 30.0,
+  "T_MIN": -12.0,
+  "T_MAX": 12.0,
+  "KP_MIN": 0.0,
+  "KP_MAX": 500.0,
+  "KD_MIN": 0.0,
+  "KD_MAX": 5.0,
+  "POSITION_BITS": 32,
+  "ROTATION_BITS": 16,
+  "DIRECTION_TO_MOTOR": 0,
+  "DIRECTION_FROM_MOTOR": 128,
+  "CommunicationType": {
+    "GET_DEVICE_ID": 0,
+    "MOTOR_CONTROL": 1,
+    "MOTOR_FEEDBACK": 2,
+    "MOTOR_ENABLE": 3,
+    "MOTOR_STOP": 4,
+    "SET_ZERO_POSITION": 6,
+    "SET_CAN_ID": 7,
+    "READ_PARAM": 17,
+    "WRITE_PARAM": 18,
+    "FAULT_FEEDBACK": 21,
+    "MODIFY_BAUDRATE": 22,
+    "EMERGENCY_STOP": 160,
+    "LOAD_PARAM": 11073
+  },
+  "RunMode": {
+    "UNKNOWN": -1,
+    "MOTION_CONTROL": 0,
+    "POSITION_MODE": 1,
+    "SPEED_MODE": 2,
+    "CURRENT_MODE": 3,
+    "ZERO_MODE": 4
+  },
+  "ParamIndex": {
+    "RUN_MODE": {
+      "index": 28677,
+      "type": "uint8"
+    },
+    "IQ_REF": {
+      "index": 28678,
+      "type": "float"
+    },
+    "SPD_REF": {
+      "index": 28682,
+      "type": "float"
+    },
+    "LIMIT_TORQUE": {
+      "index": 28683,
+      "type": "float"
+    },
+    "CUR_KP": {
+      "index": 28688,
+      "type": "float"
+    },
+    "CUR_KI": {
+      "index": 28689,
+      "type": "float"
+    },
+    "CUR_FILT_GAIN": {
+      "index": 28692,
+      "type": "float"
+    },
+    "LOC_REF": {
+      "index": 28694,
+      "type": "float"
+    },
+    "LIMIT_SPD": {
+      "index": 28695,
+      "type": "float"
+    },
+    "LIMIT_CUR": {
+      "index": 28696,
+      "type": "float"
+    },
+    "MECH_POS": {
+      "index": 28697,
+      "type": "float"
+    },
+    "IQF": {
+      "index": 28698,
+      "type": "float"
+    },
+    "MECH_VEL": {
+      "index": 28699,
+      "type": "float"
+    },
+    "VBUS": {
+      "index": 28700,
+      "type": "float"
+    },
+    "ROTATION": {
+      "index": 28701,
+      "type": "int16"
+    },
+    "LOC_KP": {
+      "index": 28702,
+      "type": "float"
+    },
+    "SPD_KP": {
+      "index": 28703,
+      "type": "float"
+    },
+    "SPD_KI": {
+      "index": 28704,
+      "type": "float"
+    },
+    "MOD_POS": {
+      "index": 28693,
+      "type": "float"
+    }
+  }
+}
