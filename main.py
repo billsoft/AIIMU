@@ -45,6 +45,14 @@ class GimbalController:
             self.motor_right.reset_rotation()
         )
         await asyncio.sleep(0.1)
+
+        # 设置电机参数 机械零位
+        await asyncio.gather(
+            self.moter_left.set_zero_position(),
+            self.moter_right.set_zero_position()
+        )
+        await asyncio.sleep(0.1)
+
         # 启动控制和打印任务
         self.control_task = asyncio.create_task(self.control_loop())
         self.print_task = asyncio.create_task(self.print_euler_angles())
