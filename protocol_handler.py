@@ -171,7 +171,7 @@ class ProtocolHandler:
 
             # 解析 CAN ID 中的状态信息
             # bit23-16: motor_can_id
-            motor_can_id = (can_id >> 16) & 0xFF
+            motor_can_id = (can_id >> 8) & 0xFF
 
             # bit21-16: faults (6 bits)
             faults_bits = (can_id >> 16) & 0x3F  # 6位故障信息
@@ -197,7 +197,7 @@ class ProtocolHandler:
             # Byte2-3: speed_raw (uint16, little endian)
             # Byte4-5: torque_raw (uint16, little endian)
             # Byte6-7: temp_raw (uint16, little endian)
-            angle_raw, speed_raw, torque_raw, temp_raw = struct.unpack('<HHHH', data)
+            angle_raw, speed_raw, torque_raw, temp_raw = struct.unpack('>HHHH', data)
 
             # 转换为物理量
             angle = uint_to_float(angle_raw, -4 * math.pi, 4 * math.pi, 16)

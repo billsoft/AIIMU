@@ -135,7 +135,7 @@ class GimbalController:
         """以1Hz的频率打印实时欧拉角"""
         try:
             while self.running:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.3)
                 angle_left = self.motor_left.get_real_time_position()
                 angle_right = self.motor_right.get_real_time_position()
                 if angle_left is None or angle_right is None:

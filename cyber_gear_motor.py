@@ -4,7 +4,7 @@ import asyncio
 import struct
 import logging
 import math  # 确保math模块被导入
-from typing import Optional
+from typing import Optional, Any
 from constants import Constants
 from protocol_handler import ProtocolHandler, MotorEvent, EventType, MotorMessage
 from async_serial import AsyncSerial
@@ -59,6 +59,10 @@ class CyberGearMotor:
             await self.serial.connect()
             self.is_connected = True
             logger.info(f"电机 {self.can_id} 连接到串口 {self.serial_port} 成功。")
+
+            # 重新连接后把电机模式设置为未知
+            self.current_mode = Constants.RunMode['UNKNOWN']
+
             # 启动后台任务，定期发送写参数命令以触发电机反馈
             self.position_task = asyncio.create_task(self._real_time_feedback_loop())
         except Exception as e:
@@ -111,32 +115,198 @@ class CyberGearMotor:
         await asyncio.sleep(0.1)
         logger.info("已发送设置机械零位命令。")
 
+    async def send_message(self, message: MotorMessage, direction: int = Constants.DIRECTION_TO_MOTOR):
+        """发送消息"""
+        frame = self.protocol_handler.encode_message(message, direction)
+        await self.serial.send_frame(frame)
+        logger.debug(f"电机 {self.can_id} 发送消息: {frame.hex()}")
+
+    async def set_param(self, param_name: str, value: Any):
+        """通用设置参数的方法
+
+        Args:
+            param_name (str): 参数名称，如 'RUN_MODE'
+            value (Any): 参数值，根据 param_type 定义
+        """
+        try:
+            index = Constants.ParamIndex[param_name]['index']
+            param_type = Constants.ParamIndex[param_name]['type']
+            data = bytearray(8)
+
+            if param_type == 'uint8':
+                struct.pack_into('<H2xB3x', data, 0, index, value)
+            elif param_type == 'uint16':
+                struct.pack_into('<H2xH2x', data, 0, index, value)
+            elif param_type == 'uint32':
+                struct.pack_into('<H2xI', data, 0, index, value)
+            elif param_type == 'float':
+                # 假设 float 参数占用 4 字节，从 Byte4 开始
+                struct.pack_into('<H2xf', data, 0, index, value)
+            elif param_type == 'int16':
+                struct.pack_into('<H2xh', data, 0, index, value)
+            else:
+                logger.error(f"Unsupported parameter type for {param_name}: {param_type}")
+                return
+
+            message = MotorMessage(
+                can_id=self.can_id,
+                master_id=self.master_id,
+                communication_type=Constants.CommunicationType['WRITE_PARAM'],
+                data_field=self.master_id,
+                data=data
+            )
+            await self.send_message(message)
+            await asyncio.sleep(0.1)
+
+            # 如果设置的是运行模式，则更新 current_mode 并使能电机
+            if param_name == 'RUN_MODE':
+                self.current_mode = value
+                await self.enable_motor()
+
+            logger.info(f"已发送设置参数 {param_name}：{value}")
+        except KeyError as e:
+            logger.error(f"参数名称 {param_name} 未在 Constants.ParamIndex 中定义。")
+        except Exception as e:
+            logger.error(f"设置参数 {param_name} 时发生错误：{e}")
+
     async def set_run_mode(self, run_mode: int):
         """设置运行模式并使能电机"""
-        index = Constants.ParamIndex['RUN_MODE']['index']
+        await self.set_param('RUN_MODE', run_mode)
+
+    async def set_limit_spd(self, speed: float):
+        """设置电机最大速度"""
+        await self.set_param('LIMIT_SPD', speed)
+
+    async def set_loc_ref(self, position: float):
+        """设置位置参考"""
+        await self.set_param('LOC_REF', position)
+
+    async def send_write_param_command(self):
+        """发送写参数命令，触发电机返回通信类型 2 的反馈"""
+        await self.set_param('SPD_KP', 1.0)
+
+    async def reset_rotation(self):
+        """重置圈数为 0"""
+        await self.set_param('ROTATION', 0)
+        logger.info(f"电机 {self.can_id} 圈数已重置为 0。")
+
+    async def set_position(self, position: float, speed: float = 2.0):
+        """设置电机位置"""
+        if self.current_mode != Constants.RunMode['POSITION_MODE']:
+            await self.stop_motor()
+            await asyncio.sleep(0.01)
+            await self.set_run_mode(Constants.RunMode['POSITION_MODE'])
+            await asyncio.sleep(0.01)
+            self.current_mode = Constants.RunMode['POSITION_MODE']
+
+        await self.set_limit_spd(speed)
+        await asyncio.sleep(0.01)
+
+        await self.set_loc_ref(position)
+        await asyncio.sleep(0.01)
+        logger.info(f"已发送位置指令：{position} rad")
+
+    def degrees_to_radians(self, degrees: float):
+        """将角度转换为弧度"""
+        return degrees * (math.pi / 180.0)
+
+    def radians_to_degrees(self, radians: float):
+        """将弧度转换为角度"""
+        return radians / (180.0 / math.pi)
+
+    async def set_position_angle(self, angle: float, speed: float = 2.0):
+        """设置电机位置角度"""
+        await self.set_position(self.degrees_to_radians(angle), speed)
+
+    async def enable_motor(self):
+        """使能电机"""
         data = bytearray(8)
-        # 数据区使用小端字节序 '<'
-        param_type = Constants.ParamIndex['RUN_MODE']['type']
-        if param_type == 'uint8':
-            struct.pack_into('<H2xB3x', data, 0, index, run_mode)
-        elif param_type == 'uint16':
-            struct.pack_into('<H2xH2x', data, 0, index, run_mode)
-        elif param_type == 'uint32':
-            struct.pack_into('<H2xI', data, 0, index, run_mode)
-        else:
-            logger.error(f"Unsupported parameter type for RUN_MODE: {param_type}")
-            return
         message = MotorMessage(
             can_id=self.can_id,
             master_id=self.master_id,
-            communication_type=Constants.CommunicationType['WRITE_PARAM'],
+            communication_type=Constants.CommunicationType['MOTOR_ENABLE'],
             data_field=self.master_id,
             data=data
         )
         await self.send_message(message)
-        await asyncio.sleep(0.1)
-        self.current_mode = run_mode
-        await self.enable_motor()
+        logger.info("电机已使能。")
+
+    async def stop_motor(self):
+        """禁用电机"""
+        data = bytearray(8)
+        message = MotorMessage(
+            can_id=self.can_id,
+            master_id=self.master_id,
+            communication_type=Constants.CommunicationType['MOTOR_STOP'],
+            data_field=self.master_id,
+            data=data
+        )
+        await self.send_message(message)
+        logger.info("电机已停止。")
+
+    async def emergency_stop(self):
+        """紧急停止电机"""
+        data = bytearray(8)
+        data[0] = 0x01
+        message = MotorMessage(
+            can_id=self.can_id,
+            master_id=self.master_id,
+            communication_type=Constants.CommunicationType['EMERGENCY_STOP'],
+            data_field=self.master_id,
+            data=data
+        )
+        await self.send_message(message)
+        logger.info("已发送紧急停止命令。")
+
+    async def _real_time_feedback_loop(self):
+        """后台任务，定期发送写参数命令以触发电机反馈，获取实时状态"""
+        try:
+            while True:
+                await self.send_write_param_command()
+                await asyncio.sleep(self.position_request_interval)
+        except asyncio.CancelledError:
+            pass
+
+    def get_real_time_position(self) -> Optional[float]:
+        """获取当前的实时位置（弧度）并归一化到 [-pi, pi]"""
+        angle = self.cache.get('angle', None)
+        if angle is not None:
+            # 归一化角度到 [-pi, pi]
+            angle_normalized = ((angle + math.pi) % (2 * math.pi)) - math.pi
+            logger.info(f"电机 {self.can_id} 实时位置：{angle_normalized} 弧度")
+            return angle_normalized
+        else:
+            logger.warning(f"电机 {self.can_id} 实时位置未就绪。")
+            return None
+
+    async def send_control_command(self, angle: float = 0.0, speed: float = 0.0,
+                                   kp: float = 0.0, kd: float = 0.0):
+        """发送运动控制命令（通信类型 1）
+
+        Args:
+            angle (float): 目标角度（弧度），范围 [-4π, 4π]
+            speed (float): 目标速度（弧度/秒），范围 [-30, 30]
+            kp (float): 比例增益，范围 [0, 500]
+            kd (float): 微分增益，范围 [0, 5]
+        """
+        data = bytearray(8)
+        # 将物理量转换为无符号整数
+        angle_raw = float_to_uint(angle, -4 * math.pi, 4 * math.pi, 16)
+        speed_raw = float_to_uint(speed, -30.0, 30.0, 16)
+        kp_raw = float_to_uint(kp, 0.0, 500.0, 16)
+        kd_raw = float_to_uint(kd, 0.0, 5.0, 16)
+        # 组装数据
+        # 由于所有字段均为 2 字节，直接拼接
+        struct.pack_into('>HHHH', data, 0, angle_raw, speed_raw, kp_raw, kd_raw)
+        message = MotorMessage(
+            can_id=self.can_id,
+            master_id=self.master_id,
+            communication_type=Constants.CommunicationType['MOTOR_CONTROL'],
+            data_field=self.master_id,
+            data=data
+        )
+        await self.send_message(message)
+        logger.debug(f"电机 {self.can_id} 发送运动控制命令。")
 
     def _on_frame_received(self, frame: bytes):
         """处理接收到的帧"""
@@ -189,167 +359,3 @@ class CyberGearMotor:
             logger.warning(f"电机 {self.can_id} 故障信息: {data}")
         except Exception as e:
             logger.error(f"解析故障反馈错误: {e}")
-
-    async def set_limit_spd(self, speed: float):
-        """设置电机最大速度"""
-        index = Constants.ParamIndex['LIMIT_SPD']['index']
-        data = bytearray(8)
-        struct.pack_into('<H2xf', data, 0, index, speed)
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['WRITE_PARAM'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.info(f"已发送设置最大速度：{speed} rad/s")
-
-    async def set_loc_ref(self, position: float):
-        """设置位置参考"""
-        index = Constants.ParamIndex['LOC_REF']['index']
-        data = bytearray(8)
-        struct.pack_into('<H2xf', data, 0, index, position)
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['WRITE_PARAM'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.info(f"已发送设置位置参考：{position} rad")
-
-    async def set_position(self, position: float, speed: float = 2.0):
-        """设置电机位置"""
-        if self.current_mode != Constants.RunMode['POSITION_MODE']:
-            await self.stop_motor()
-            await asyncio.sleep(0.01)
-            await self.set_run_mode(Constants.RunMode['POSITION_MODE'])
-            await asyncio.sleep(0.01)
-        await self.set_limit_spd(speed)
-        await asyncio.sleep(0.01)
-        await self.set_loc_ref(position)
-        await asyncio.sleep(0.01)
-        logger.info(f"已发送位置指令：{position} rad")
-
-    async def enable_motor(self):
-        """使能电机"""
-        data = bytearray(8)
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['MOTOR_ENABLE'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.info("电机已使能。")
-
-    async def stop_motor(self):
-        """禁用电机"""
-        data = bytearray(8)
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['MOTOR_STOP'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.info("电机已停止。")
-
-    async def emergency_stop(self):
-        """紧急停止电机"""
-        data = bytearray(8)
-        data[0] = 0x01
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['EMERGENCY_STOP'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.info("已发送紧急停止命令。")
-
-    async def _real_time_feedback_loop(self):
-        """后台任务，定期发送写参数命令以触发电机反馈，获取实时状态"""
-        try:
-            while True:
-                await self.send_write_param_command()
-                await asyncio.sleep(self.position_request_interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def send_write_param_command(self):
-        """发送写参数命令，触发电机返回通信类型 2 的反馈"""
-        index = Constants.ParamIndex['CUR_KP']['index']  # 假设使用 CUR_KP 参数
-        data = bytearray(8)
-        cur_kp_value = self.cache.get(f"param_{index}", 1.0)  # 默认值为 1.0
-        struct.pack_into('<H2xf', data, 0, index, cur_kp_value)
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['WRITE_PARAM'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.debug(f"电机 {self.can_id} 发送写参数命令以触发反馈。")
-
-    def get_real_time_position(self) -> Optional[float]:
-        """获取当前的实时位置（弧度）并归一化到 [-pi, pi]"""
-        angle = self.cache.get('angle', None)
-        if angle is not None:
-            # 归一化角度到 [-pi, pi]
-            angle_normalized = ((angle + math.pi) % (2 * math.pi)) - math.pi
-            logger.info(f"电机 {self.can_id} 实时位置：{angle_normalized} 弧度")
-            return angle_normalized
-        else:
-            logger.warning(f"电机 {self.can_id} 实时位置未就绪。")
-            return None
-
-    async def reset_rotation(self):
-        """重置圈数为 0"""
-        index = Constants.ParamIndex['ROTATION']['index']
-        data = bytearray(8)
-        struct.pack_into('<H2xh', data, 0, index, 0)
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['WRITE_PARAM'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.info(f"电机 {self.can_id} 圈数已重置为 0。")
-
-    async def send_control_command(self, angle: float = 0.0, speed: float = 0.0,
-                                   kp: float = 0.0, kd: float = 0.0):
-        """发送运动控制命令（通信类型 1）
-
-        Args:
-            angle (float): 目标角度（弧度），范围 [-4π, 4π]
-            speed (float): 目标速度（弧度/秒），范围 [-30, 30]
-            kp (float): 比例增益，范围 [0, 500]
-            kd (float): 微分增益，范围 [0, 5]
-        """
-        data = bytearray(8)
-        # 将物理量转换为无符号整数
-        angle_raw = float_to_uint(angle, -4 * math.pi, 4 * math.pi, 16)
-        speed_raw = float_to_uint(speed, -30.0, 30.0, 16)
-        kp_raw = float_to_uint(kp, 0.0, 500.0, 16)
-        kd_raw = float_to_uint(kd, 0.0, 5.0, 16)
-        # 组装数据
-        # 由于所有字段均为 2 字节，直接拼接
-        struct.pack_into('<HHHH', data, 0, angle_raw, speed_raw, kp_raw, kd_raw)
-        message = MotorMessage(
-            can_id=self.can_id,
-            master_id=self.master_id,
-            communication_type=Constants.CommunicationType['MOTOR_CONTROL'],
-            data_field=self.master_id,
-            data=data
-        )
-        await self.send_message(message)
-        logger.debug(f"电机 {self.can_id} 发送运动控制命令。")
