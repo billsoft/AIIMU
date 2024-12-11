@@ -37,9 +37,6 @@ class CyberGearMotor:
         self.can_id = can_id & 0xFF
         self.master_id = master_id & 0xFF
         self.cache = {}
-        # 增加一个异步锁来保护cache访问
-        self.cache_lock = asyncio.Lock()
-
         self.protocol_handler = ProtocolHandler()
         self.serial_port = serial_port
         self.serial = AsyncSerial(
@@ -118,6 +115,12 @@ class CyberGearMotor:
         await asyncio.sleep(0.001)
         logger.info("已发送设置机械零位命令。")
 
+    async def send_message(self, message: MotorMessage, direction: int = Constants.DIRECTION_TO_MOTOR):
+        """发送消息"""
+        frame = self.protocol_handler.encode_message(message, direction)
+        await self.serial.send_frame(frame)
+        logger.debug(f"电机 {self.can_id} 发送消息: {frame.hex()}")
+
     async def set_param(self, param_name: str, value: Any):
         """通用设置参数的方法
 
@@ -137,6 +140,7 @@ class CyberGearMotor:
             elif param_type == 'uint32':
                 struct.pack_into('<H2xI', data, 0, index, value)
             elif param_type == 'float':
+                # 假设 float 参数占用 4 字节，从 Byte4 开始
                 struct.pack_into('<H2xf', data, 0, index, value)
             elif param_type == 'int16':
                 struct.pack_into('<H2xh', data, 0, index, value)
@@ -154,6 +158,7 @@ class CyberGearMotor:
             await self.send_message(message)
             await asyncio.sleep(0.001)
 
+            # 如果设置的是运行模式，则更新 current_mode 并使能电机
             if param_name == 'RUN_MODE':
                 self.current_mode = value
                 await self.enable_motor()
@@ -262,12 +267,11 @@ class CyberGearMotor:
         except asyncio.CancelledError:
             pass
 
-    # 将get_real_time_position修改为异步，添加锁保护cache访问
-    async def get_real_time_position(self) -> Optional[float]:
-        """异步获取当前的实时位置（弧度）并归一化到 [-pi, pi]"""
-        async with self.cache_lock:
-            angle = self.cache.get('angle', None)
+    def get_real_time_position(self) -> Optional[float]:
+        """获取当前的实时位置（弧度）并归一化到 [-pi, pi]"""
+        angle = self.cache.get('angle', None)
         if angle is not None:
+            # 归一化角度到 [-pi, pi]
             angle_normalized = ((angle + math.pi) % (2 * math.pi)) - math.pi
             logger.info(f"电机 {self.can_id} 实时位置：{angle_normalized} 弧度")
             return angle_normalized
@@ -277,12 +281,22 @@ class CyberGearMotor:
 
     async def send_control_command(self, angle: float = 0.0, speed: float = 0.0,
                                    kp: float = 0.0, kd: float = 0.0):
-        """发送运动控制命令（通信类型 1）"""
+        """发送运动控制命令（通信类型 1）
+
+        Args:
+            angle (float): 目标角度（弧度），范围 [-4π, 4π]
+            speed (float): 目标速度（弧度/秒），范围 [-30, 30]
+            kp (float): 比例增益，范围 [0, 500]
+            kd (float): 微分增益，范围 [0, 5]
+        """
         data = bytearray(8)
+        # 将物理量转换为无符号整数
         angle_raw = float_to_uint(angle, -4 * math.pi, 4 * math.pi, 16)
         speed_raw = float_to_uint(speed, -30.0, 30.0, 16)
         kp_raw = float_to_uint(kp, 0.0, 500.0, 16)
         kd_raw = float_to_uint(kd, 0.0, 5.0, 16)
+        # 组装数据
+        # 由于所有字段均为 2 字节，直接拼接
         struct.pack_into('>HHHH', data, 0, angle_raw, speed_raw, kp_raw, kd_raw)
         message = MotorMessage(
             can_id=self.can_id,
@@ -305,45 +319,43 @@ class CyberGearMotor:
             return
         if event:
             logger.debug(f"电机 {self.can_id} 收到事件: {event.event_type}")
-            # 调用处理事件的异步方法（需要包装为task或to_thread以确保锁）
-            asyncio.create_task(self._handle_event_async(event))
+            self._handle_event(event)
         else:
             logger.warning(f"电机 {self.can_id} 收到未知类型的消息。")
 
-    async def _handle_event_async(self, event: Optional[MotorEvent]):
-        """异步处理事件，避免同步问题"""
+    def _handle_event(self, event: Optional[MotorEvent]):
+        """根据事件处理相关数据"""
         if not event:
             return
         if event.event_type == EventType.MOTOR_FEEDBACK:
-            await self._handle_motor_feedback(event.data)
+            self._handle_motor_feedback(event.data)
         elif event.event_type == EventType.PARAM_FEEDBACK:
-            await self._handle_param_feedback(event.data)
+            self._handle_param_feedback(event.data)
         elif event.event_type == EventType.FAULT_FEEDBACK:
-            await self._handle_fault_feedback(event.data)
+            self._handle_fault_feedback(event.data)
 
-    async def _handle_motor_feedback(self, data: dict):
-        """处理电机反馈数据，加锁保护"""
+    def _handle_motor_feedback(self, data: dict):
+        """处理电机反馈数据"""
         try:
-            async with self.cache_lock:
-                self.cache.update(data)
+            self.cache.update(data)
             logger.debug(f"电机 {self.can_id} 电机反馈数据更新：{data}")
         except Exception as e:
             logger.error(f"解析电机反馈数据错误: {e}")
 
-    async def _handle_param_feedback(self, data: dict):
-        """处理参数反馈，加锁保护"""
+    def _handle_param_feedback(self, data: dict):
+        """处理参数反馈"""
         try:
-            async with self.cache_lock:
-                self.cache.update({f"param_{data['param_index']}": data['param_value']})
+            self.cache.update({
+                f"param_{data['param_index']}": data['param_value'],
+            })
             logger.info(f"电机 {self.can_id} 参数反馈更新：{data}")
         except Exception as e:
             logger.error(f"解析参数反馈错误: {e}")
 
-    async def _handle_fault_feedback(self, data: dict):
-        """处理故障反馈，加锁保护"""
+    def _handle_fault_feedback(self, data: dict):
+        """处理故障反馈"""
         try:
-            async with self.cache_lock:
-                self.cache.update(data)
+            self.cache.update(data)
             logger.warning(f"电机 {self.can_id} 故障信息: {data}")
         except Exception as e:
             logger.error(f"解析故障反馈错误: {e}")
