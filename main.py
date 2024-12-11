@@ -12,6 +12,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class GimbalController:
+    """云台控制器类，采用先虚拟两步计算、最后一次到位的方式实现给定俯仰(pitch)和滚转(roll)目标
+    """
+
     MODE_2DOF_RANDOM = '2dof_random'
     MODE_PITCH_RANDOM = 'pitch_random'
     MODE_PITCH_SINE = 'pitch_sine'
@@ -29,18 +32,21 @@ class GimbalController:
         self.print_task = None
 
     async def start(self):
+        """启动云台控制器并初始化电机"""
         await asyncio.gather(
             self.motor_left.connect(),
             self.motor_right.connect()
         )
         await asyncio.sleep(0.01)
 
+        # 重置电机圈数
         await asyncio.gather(
             self.motor_left.reset_rotation(),
             self.motor_right.reset_rotation()
         )
         await asyncio.sleep(0.01)
 
+        # 设置电机零位
         await asyncio.gather(
             self.motor_left.set_zero_position(),
             self.motor_right.set_zero_position()
@@ -57,6 +63,10 @@ class GimbalController:
             pass
 
     async def control_loop(self):
+        """
+        控制循环，根据模式产生目标pitch和roll，然后用变量模拟两步法计算最终L,R，
+        不在中间发命令，只在计算结束后一次性下发最终L,R指令到电机。
+        """
         try:
             while self.running:
                 if self.mode == self.MODE_2DOF_RANDOM:
@@ -103,23 +113,30 @@ class GimbalController:
             pass
 
     async def one_shot_set_positions(self, pitch_final: float, roll_final: float):
-        # 两步法逻辑(仅逻辑计算，不发中间命令)：
+        """
+        不先物理转电机，而是在代码中先计算两步法逻辑，然后最终一次性下发电机指令：
+
+        两步法逻辑(仅逻辑计算，不发命令)：
+        """
+        # 步骤1：roll_final/2, roll_final/2
         L_roll = -roll_final/2
         R_roll = -roll_final/2
 
+        # 步骤2：叠加pitch_final
         L_pitch = pitch_final
-        R_pitch = -pitch_final
-
+        R_pitch = - pitch_final
+        # 计算最终角度
         L_final = L_roll + L_pitch
         R_final = R_roll + R_pitch
 
-        # 使用asyncio.to_thread以并发方式执行电机设定，减少先后时间差
+        # 最终一次性下发命令到电机
         await asyncio.gather(
-            asyncio.to_thread(asyncio.run, self.motor_left.set_position(L_final)),
-            asyncio.to_thread(asyncio.run, self.motor_right.set_position(R_final))
+            self.motor_left.set_position(L_final),
+            self.motor_right.set_position(R_final)
         )
 
     async def print_euler_angles(self):
+        """定期打印当前欧拉角(roll, pitch, yaw)"""
         try:
             while self.running:
                 await asyncio.sleep(0.1)
@@ -142,12 +159,20 @@ class GimbalController:
             pass
 
     def calculate_euler_angles(self, L: float, R: float):
+        """
+        pitch=(L-R), roll=(L+R), yaw=0
+        L,R为电机当前弧度
+        """
         euler_angles = self.compute_final(L, R)
+
         self.euler_angles['roll'] = euler_angles[0]
         self.euler_angles['pitch'] = euler_angles[1]
         self.euler_angles['yaw'] = 0.0
 
     def compute_final(self, L_final: float, R_final: float):
+        """
+        给定最终电机角度 L_final 和 R_final，求出 roll_final 和 pitch_final。
+        """
         roll_final = -(L_final + R_final)
         pitch_final = (L_final - R_final) / 2.0
         return roll_final, pitch_final, 0.0
@@ -176,6 +201,8 @@ class GimbalController:
         )
 
 def main():
+    """主函数，创建云台控制器并运行"""
+    # 根据实际情况调整CAN ID和串口
     motor_left = CyberGearMotor(
         can_id=127,
         serial_port='COM5',
@@ -208,6 +235,7 @@ def main():
     }
 
     selected_mode = mode_map.get(mode_input, GimbalController.MODE_PITCH_RANDOM)
+
     gimbal_controller = GimbalController(motor_left, motor_right, mode=selected_mode)
     loop = asyncio.get_event_loop()
     try:
