@@ -112,7 +112,7 @@ class CyberGearMotor:
             data=data
         )
         await self.send_message(message)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.01)
         logger.info("已发送设置机械零位命令。")
 
     async def send_message(self, message: MotorMessage, direction: int = Constants.DIRECTION_TO_MOTOR):
@@ -156,7 +156,7 @@ class CyberGearMotor:
                 data=data
             )
             await self.send_message(message)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
 
             # 如果设置的是运行模式，则更新 current_mode 并使能电机
             if param_name == 'RUN_MODE':

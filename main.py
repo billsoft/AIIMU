@@ -64,7 +64,7 @@ class GimbalController:
             self.motor_left.connect(),
             self.motor_right.connect()
         )
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
 
         # 重置电机圈数
         await asyncio.gather(
@@ -106,7 +106,7 @@ class GimbalController:
                     pitch_final = 0.6 * math.sin(0.5 * t)
                     roll_final = 0.0
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
                     continue
                 elif self.mode == self.MODE_ROLL:
                     pitch_final = 0.0
@@ -116,7 +116,7 @@ class GimbalController:
                     pitch_final = 0.0
                     roll_final = 0.6 * math.sin(0.5 * t)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
                     continue
                 elif self.mode == self.MODE_LEVEL_ROLL_SEEK_EAST:
                     t = asyncio.get_event_loop().time()
@@ -127,14 +127,14 @@ class GimbalController:
                         pitch_final = 0.0
                         roll_final = 0.6 * math.sin(0.5 * t)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.01)
                     continue
                 else:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.01)
                     continue
 
                 await self.one_shot_set_positions(pitch_final, roll_final)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             pass
 
@@ -165,7 +165,7 @@ class GimbalController:
         """定期打印当前欧拉角(roll, pitch, yaw)"""
         try:
             while self.running:
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
                 angle_left = self.motor_left.get_real_time_position()
                 angle_right = self.motor_right.get_real_time_position()
                 if angle_left is None or angle_right is None:
@@ -191,42 +191,9 @@ class GimbalController:
         """
         euler_angles = self.compute_final(L, R)
 
-        self.euler_angles['pitch'] = euler_angles[1]
         self.euler_angles['roll'] = euler_angles[0]
+        self.euler_angles['pitch'] = euler_angles[1]
         self.euler_angles['yaw'] = 0.0
-
-    # 假设最终电机角度为 L_final 和 R_final
-    # 已知约束：
-    # roll是由电机同步同向等距变化形成，roll_final 对应 L_roll = R_roll = -roll_final/2
-    # pitch是由电机等距同步反向变化形成，pitch_final 对应 L_pitch = pitch_final, R_pitch = -pitch_final
-
-    # 最终：
-    # L_final = L_roll + L_pitch = (-roll_final/2) + (pitch_final)
-    # R_final = R_roll + R_pitch = (-roll_final/2) + (-pitch_final)
-
-    # 两个方程：
-    # L_final = -roll_final/2 + pitch_final
-    # R_final = -roll_final/2 - pitch_final
-
-    # 求roll_final和pitch_final：
-    # 将两个方程相加：
-    # L_final + R_final = (-roll_final/2 + pitch_final) + (-roll_final/2 - pitch_final)
-    #                  = -roll_final/2 - roll_final/2 + pitch_final - pitch_final
-    #                  = -roll_final
-    #
-    # => roll_final = -(L_final + R_final)
-
-    # 将两个方程相减：
-    # L_final - R_final = (-roll_final/2 + pitch_final) - (-roll_final/2 - pitch_final)
-    #                   = (-roll_final/2 + pitch_final) + (roll_final/2 + pitch_final)
-    #                   = -roll_final/2 + roll_final/2 + pitch_final + pitch_final
-    #                   = 0 + 2*pitch_final
-    #
-    # => pitch_final = (L_final - R_final)/2
-
-    # 最终公式：
-    # roll_final = -(L_final + R_final)
-    # pitch_final = (L_final - R_final)/2
 
     def compute_final(self, L_final: float, R_final: float):
         """
@@ -235,13 +202,6 @@ class GimbalController:
         roll_final = -(L_final + R_final)
         pitch_final = (L_final - R_final) / 2.0
         return roll_final, pitch_final, 0.0
-
-    # 示例验证
-    # 如果 L_final=0, R_final=10 (例如先滚转后俯仰得出结果)
-    # roll_final, pitch_final = compute_final(0,10)
-    # => roll_final= -(0+10)=-10, pitch_final=(0-10)/2=-5
-    # 说明最终roll_final=-10, pitch_final=-5
-    # 根据此前逻辑，可以验证是否和原设定一致
 
     async def stop(self):
         self.running = False
