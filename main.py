@@ -12,9 +12,36 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class GimbalController:
-    """云台控制器类，负责控制电机和计算欧拉角"""
+    """云台控制器类，采用先虚拟两步计算、最后一次到位的方式实现给定俯仰(pitch)和滚转(roll)目标
 
-    # 定义云台的运行模式
+    本云台有俯仰(Pitch)和滚转(Roll)两个自由度：
+    - 当两个电机同向等量转动时改变roll。
+    - 当两个电机反向等量转动时改变pitch。
+
+    原则(两步法逻辑，但不在中间真正执行电机命令，只在变量中模拟)：
+    假设目标roll_final, pitch_final:
+    1) 先计算实现roll_final的中间状态（虚拟状态）:
+       roll = L+R
+       roll_final时 L=R=roll_final/2 (不实际下发命令，只用变量表示)
+    2) 在该中间状态基础上实现pitch_final:
+       pitch = L-R
+       初始roll实现后 L=R=roll_final/2 => pitch=0
+       要pitch_final: (L_new - R_new)=pitch_final
+       可令L_new = roll_final/2 + pitch_final/2
+          R_new = roll_final/2 - pitch_final/2
+
+    整个过程在代码中用变量L,R先算出最终电机角度，
+    然后一次性下发(L_final, R_final)给电机完成最终姿态。
+
+    最终:
+    L_final = (roll_final/2) + (pitch_final/2)
+    R_final = (roll_final/2) - (pitch_final/2)
+
+    如此无论roll_final与pitch_final为何，最终一次电机指令达到目标姿态。
+
+    注：电机角度与计算均使用弧度(rad)，打印欧拉角时转换为度输出。
+    """
+
     MODE_2DOF_RANDOM = '2dof_random'
     MODE_PITCH_RANDOM = 'pitch_random'
     MODE_PITCH_SINE = 'pitch_sine'
@@ -26,29 +53,35 @@ class GimbalController:
         self.motor_left = motor_left
         self.motor_right = motor_right
         self.running = True
-        self.mode = mode  # 设置运行模式
+        self.mode = mode
         self.euler_angles = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
         self.control_task = None
         self.print_task = None
 
     async def start(self):
-        """启动云台控制器"""
-        # 启动电机连接
+        """启动云台控制器并初始化电机"""
         await asyncio.gather(
             self.motor_left.connect(),
             self.motor_right.connect()
         )
         await asyncio.sleep(0.5)
-        # 重置圈数
+
+        # 重置电机圈数
         await asyncio.gather(
             self.motor_left.reset_rotation(),
             self.motor_right.reset_rotation()
         )
         await asyncio.sleep(0.1)
-        # 启动控制和打印任务
+
+        # 设置电机零位
+        await asyncio.gather(
+            self.motor_left.set_zero_position(),
+            self.motor_right.set_zero_position()
+        )
+
         self.control_task = asyncio.create_task(self.control_loop())
         self.print_task = asyncio.create_task(self.print_euler_angles())
-        # 等待运行状态变为 False
+
         try:
             while self.running:
                 await asyncio.sleep(0.1)
@@ -56,83 +89,80 @@ class GimbalController:
             pass
 
     async def control_loop(self):
-        """控制循环，根据模式控制电机"""
+        """
+        控制循环，根据模式产生目标pitch和roll，然后用变量模拟两步法计算最终L,R，
+        不在中间发命令，只在计算结束后一次性下发最终L,R指令到电机。
+        """
         try:
             while self.running:
                 if self.mode == self.MODE_2DOF_RANDOM:
-                    # 1. 二自由度随机运动：随机改变俯仰和滚转角度
-                    target_pitch = random.uniform(-0.6, 0.6)  # 弧度
-                    target_roll = random.uniform(-0.6, 0.6)   # 弧度
-                    motor_left_angle, motor_right_angle = self.calculate_motor_angles(target_pitch, target_roll)
-                    await asyncio.gather(
-                        self.motor_left.set_position(motor_left_angle),
-                        self.motor_right.set_position(motor_right_angle)
-                    )
+                    pitch_final = random.uniform(-0.6, 0.6)
+                    roll_final = random.uniform(-0.6, 0.6)
                 elif self.mode == self.MODE_PITCH_RANDOM:
-                    # 2. 俯仰随机运动：随机改变俯仰角度，滚转角为0
-                    target_pitch = random.uniform(-0.6, 0.6)  # 弧度
-                    motor_left_angle, motor_right_angle = self.calculate_motor_angles(target_pitch, 0.0)
-                    await asyncio.gather(
-                        self.motor_left.set_position(motor_left_angle),
-                        self.motor_right.set_position(motor_right_angle)
-                    )
+                    pitch_final = random.uniform(-0.6, 0.6)
+                    roll_final = 0.0
                 elif self.mode == self.MODE_PITCH_SINE:
-                    # 3. 俯仰正弦往复运动，滚转角为0
                     t = asyncio.get_event_loop().time()
-                    target_pitch = 0.6 * math.sin(0.5 * t)  # 弧度
-                    motor_left_angle, motor_right_angle = self.calculate_motor_angles(target_pitch, 0.0)
-                    await asyncio.gather(
-                        self.motor_left.set_position(motor_left_angle),
-                        self.motor_right.set_position(motor_right_angle)
-                    )
-                    await asyncio.sleep(0.1)  # 调整睡眠时间以获得平滑运动
+                    pitch_final = 0.6 * math.sin(0.5 * t)
+                    roll_final = 0.0
+                    await self.one_shot_set_positions(pitch_final, roll_final)
+                    await asyncio.sleep(0.1)
                     continue
                 elif self.mode == self.MODE_ROLL:
-                    # 4. 滚转运动：随机改变滚转角度，俯仰角为0
-                    target_roll = random.uniform(-0.6, 0.6)  # 弧度
-                    motor_left_angle, motor_right_angle = self.calculate_motor_angles(0.0, target_roll)
-                    await asyncio.gather(
-                        self.motor_left.set_position(motor_left_angle),
-                        self.motor_right.set_position(motor_right_angle)
-                    )
+                    pitch_final = 0.0
+                    roll_final = random.uniform(-0.6, 0.6)
                 elif self.mode == self.MODE_ROLL_SINE:
-                    # 5. 滚转正弦运动，俯仰角为0
                     t = asyncio.get_event_loop().time()
-                    target_roll = 0.6 * math.sin(0.5 * t)  # 弧度
-                    motor_left_angle, motor_right_angle = self.calculate_motor_angles(0.0, target_roll)
-                    await asyncio.gather(
-                        self.motor_left.set_position(motor_left_angle),
-                        self.motor_right.set_position(motor_right_angle)
-                    )
+                    pitch_final = 0.0
+                    roll_final = 0.6 * math.sin(0.5 * t)
+                    await self.one_shot_set_positions(pitch_final, roll_final)
                     await asyncio.sleep(0.1)
                     continue
                 elif self.mode == self.MODE_LEVEL_ROLL_SEEK_EAST:
-                    # 6. 水平、滚转正弦交替切换运动
                     t = asyncio.get_event_loop().time()
                     if int(t) % 10 < 5:
-                        # 前5秒保持水平，俯仰角和滚转角均为0
-                        motor_left_angle, motor_right_angle = self.calculate_motor_angles(0.0, 0.0)
+                        pitch_final = 0.0
+                        roll_final = 0.0
                     else:
-                        # 后5秒进行滚转正弦运动，俯仰角为0
-                        target_roll = 0.6 * math.sin(0.5 * t)  # 弧度
-                        motor_left_angle, motor_right_angle = self.calculate_motor_angles(0.0, target_roll)
-                    await asyncio.gather(
-                        self.motor_left.set_position(motor_left_angle),
-                        self.motor_right.set_position(motor_right_angle)
-                    )
+                        pitch_final = 0.0
+                        roll_final = 0.6 * math.sin(0.5 * t)
+                    await self.one_shot_set_positions(pitch_final, roll_final)
                     await asyncio.sleep(0.1)
                     continue
                 else:
-                    # 默认模式，不做任何动作
                     await asyncio.sleep(0.5)
                     continue
-                # 每次指令发送后等待一段时间
+
+                await self.one_shot_set_positions(pitch_final, roll_final)
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             pass
 
+    async def one_shot_set_positions(self, pitch_final: float, roll_final: float):
+        """
+        不先物理转电机，而是在代码中先计算两步法逻辑，然后最终一次性下发电机指令：
+
+        两步法逻辑(仅逻辑计算，不发命令)：
+        """
+        # 步骤1：roll_final/2, roll_final/2
+        L_roll = -roll_final/2
+        R_roll = -roll_final/2
+
+        # 步骤2：叠加pitch_final
+        L_pitch = pitch_final
+        R_pitch = - pitch_final
+        # 计算最终角度
+        L_final = L_roll + L_pitch
+        R_final = R_roll + R_pitch
+
+        # 最终一次性下发命令到电机
+        await asyncio.gather(
+            self.motor_left.set_position(L_final),
+            self.motor_right.set_position(R_final)
+        )
+
     async def print_euler_angles(self):
-        """以1Hz的频率打印实时欧拉角"""
+        """定期打印当前欧拉角(roll, pitch, yaw)"""
         try:
             while self.running:
                 await asyncio.sleep(0.3)
@@ -141,49 +171,80 @@ class GimbalController:
                 if angle_left is None or angle_right is None:
                     print("电机位置数据未就绪。")
                     continue
+
                 self.calculate_euler_angles(angle_left, angle_right)
-                print(f"[Euler Angles] Roll: {math.degrees(self.euler_angles['roll']):.2f}°, "
-                      f"Pitch: {math.degrees(self.euler_angles['pitch']):.2f}°, "
-                      f"Yaw: {math.degrees(self.euler_angles['yaw']):.2f}°")
+
+                roll_deg = math.degrees(self.euler_angles['roll'])
+                pitch_deg = math.degrees(self.euler_angles['pitch'])
+                yaw_deg = math.degrees(self.euler_angles['yaw'])
+
+                print(f"[Euler Angles] Roll: {roll_deg:.2f}°, "
+                      f"Pitch: {pitch_deg:.2f}°, "
+                      f"Yaw: {yaw_deg:.2f}°")
         except asyncio.CancelledError:
             pass
 
-    def calculate_motor_angles(self, pitch_angle: float, roll_angle: float) -> (float, float):
-        """根据目标俯仰角和滚转角计算电机角度
-
-        Args:
-            pitch_angle (float): 目标俯仰角（单位：弧度）
-            roll_angle (float): 目标滚转角（单位：弧度）
-
-        Returns:
-            (float, float): 左电机角度，右电机角度
+    def calculate_euler_angles(self, L: float, R: float):
         """
-        # 根据机械结构计算电机角度
-        # theta_left = pitch + roll
-        # theta_right = -pitch + roll
-        theta_left = pitch_angle + roll_angle
-        theta_right = -pitch_angle + roll_angle
-        return theta_left, theta_right
-
-    def calculate_euler_angles(self, angle_left: float, angle_right: float):
-        """根据电机角度计算云台的欧拉角
-
-        Args:
-            angle_left (float): 左电机角度（单位：弧度）
-            angle_right (float): 右电机角度（单位：弧度）
+        pitch=(L-R), roll=(L+R), yaw=0
+        L,R为电机当前弧度
         """
-        # 根据机械结构，计算俯仰和滚转角度
-        # pitch = (theta_left - theta_right) / 2
-        # roll = (theta_left + theta_right) / 2
-        self.euler_angles['pitch'] = (angle_left - angle_right) / 2
-        self.euler_angles['roll'] = (angle_left + angle_right) / 2
-        # 云台不具备偏航运动，设置为0
+        euler_angles = self.compute_final(L, R)
+
+        self.euler_angles['pitch'] = euler_angles[1]
+        self.euler_angles['roll'] = euler_angles[0]
         self.euler_angles['yaw'] = 0.0
 
+    # 假设最终电机角度为 L_final 和 R_final
+    # 已知约束：
+    # roll是由电机同步同向等距变化形成，roll_final 对应 L_roll = R_roll = -roll_final/2
+    # pitch是由电机等距同步反向变化形成，pitch_final 对应 L_pitch = pitch_final, R_pitch = -pitch_final
+
+    # 最终：
+    # L_final = L_roll + L_pitch = (-roll_final/2) + (pitch_final)
+    # R_final = R_roll + R_pitch = (-roll_final/2) + (-pitch_final)
+
+    # 两个方程：
+    # L_final = -roll_final/2 + pitch_final
+    # R_final = -roll_final/2 - pitch_final
+
+    # 求roll_final和pitch_final：
+    # 将两个方程相加：
+    # L_final + R_final = (-roll_final/2 + pitch_final) + (-roll_final/2 - pitch_final)
+    #                  = -roll_final/2 - roll_final/2 + pitch_final - pitch_final
+    #                  = -roll_final
+    #
+    # => roll_final = -(L_final + R_final)
+
+    # 将两个方程相减：
+    # L_final - R_final = (-roll_final/2 + pitch_final) - (-roll_final/2 - pitch_final)
+    #                   = (-roll_final/2 + pitch_final) + (roll_final/2 + pitch_final)
+    #                   = -roll_final/2 + roll_final/2 + pitch_final + pitch_final
+    #                   = 0 + 2*pitch_final
+    #
+    # => pitch_final = (L_final - R_final)/2
+
+    # 最终公式：
+    # roll_final = -(L_final + R_final)
+    # pitch_final = (L_final - R_final)/2
+
+    def compute_final(self, L_final: float, R_final: float):
+        """
+        给定最终电机角度 L_final 和 R_final，求出 roll_final 和 pitch_final。
+        """
+        roll_final = -(L_final + R_final)
+        pitch_final = (L_final - R_final) / 2.0
+        return roll_final, pitch_final, 0.0
+
+    # 示例验证
+    # 如果 L_final=0, R_final=10 (例如先滚转后俯仰得出结果)
+    # roll_final, pitch_final = compute_final(0,10)
+    # => roll_final= -(0+10)=-10, pitch_final=(0-10)/2=-5
+    # 说明最终roll_final=-10, pitch_final=-5
+    # 根据此前逻辑，可以验证是否和原设定一致
+
     async def stop(self):
-        """停止云台控制器"""
         self.running = False
-        # 取消任务
         if self.control_task:
             self.control_task.cancel()
             try:
@@ -196,7 +257,6 @@ class GimbalController:
                 await self.print_task
             except asyncio.CancelledError:
                 pass
-        # 紧急停止电机并关闭连接
         await asyncio.gather(
             self.motor_left.emergency_stop(),
             self.motor_right.emergency_stop()
@@ -208,21 +268,20 @@ class GimbalController:
 
 def main():
     """主函数，创建云台控制器并运行"""
-    # 创建电机实例，请确保 serial_port 设置为实际使用的串口端口
+    # 根据实际情况调整CAN ID和串口
     motor_left = CyberGearMotor(
-        can_id=127,  # 左电机的 CAN ID，请根据实际情况调整
-        serial_port='COM5',  # 左电机的串口
+        can_id=127,
+        serial_port='COM5',
         master_id=0x00FD,
         position_request_interval=1
     )
     motor_right = CyberGearMotor(
-        can_id=127,  # 右电机的 CAN ID，请根据实际情况调整
-        serial_port='COM4',  # 右电机的串口
+        can_id=127,
+        serial_port='COM4',
         master_id=0x00FD,
         position_request_interval=1/30
     )
 
-    # 提示用户选择模式
     print("请选择运行模式:")
     print("1. 二自由度随机运动")
     print("2. 俯仰随机运动")
