@@ -1,5 +1,3 @@
-# main.py
-
 import asyncio
 import random
 import math
@@ -12,9 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class GimbalController:
-    """云台控制器类，采用先虚拟两步计算、最后一次到位的方式实现给定俯仰(pitch)和滚转(roll)目标
-    """
-
+    """云台控制器类，控制俯仰(pitch)和滚转(roll)"""
     MODE_2DOF_RANDOM = '2dof_random'
     MODE_PITCH_RANDOM = 'pitch_random'
     MODE_PITCH_SINE = 'pitch_sine'
@@ -64,8 +60,7 @@ class GimbalController:
 
     async def control_loop(self):
         """
-        控制循环，根据模式产生目标pitch和roll，然后用变量模拟两步法计算最终L,R，
-        不在中间发命令，只在计算结束后一次性下发最终L,R指令到电机。
+        控制循环，根据模式产生目标pitch和roll，然后一次性下发L,R指令到电机。
         """
         try:
             while self.running:
@@ -80,7 +75,7 @@ class GimbalController:
                     pitch_final = 0.6 * math.sin(0.5 * t)
                     roll_final = 0.0
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.001)
+                    await asyncio.sleep(0)
                     continue
                 elif self.mode == self.MODE_ROLL:
                     pitch_final = 0.0
@@ -90,7 +85,7 @@ class GimbalController:
                     pitch_final = 0.0
                     roll_final = 0.6 * math.sin(0.5 * t)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.001)
+                    await asyncio.sleep(0)
                     continue
                 elif self.mode == self.MODE_LEVEL_ROLL_SEEK_EAST:
                     t = asyncio.get_event_loop().time()
@@ -101,42 +96,39 @@ class GimbalController:
                         pitch_final = 0.0
                         roll_final = 0.6 * math.sin(0.5 * t)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.001)
+                    await asyncio.sleep(0)
                     continue
                 else:
-                    await asyncio.sleep(0.001)
+                    await asyncio.sleep(0)
                     continue
 
                 await self.one_shot_set_positions(pitch_final, roll_final)
-                await asyncio.sleep(0.001)
+                await asyncio.sleep(0)
         except asyncio.CancelledError:
             pass
 
     async def one_shot_set_positions(self, pitch_final: float, roll_final: float):
         """
-        不先物理转电机，而是在代码中先计算两步法逻辑，然后最终一次性下发电机指令：
-
-        两步法逻辑(仅逻辑计算，不发命令)：
+        一次性下发电机位置指令，不改变原有计算逻辑和功能。
         """
-        # 步骤1：roll_final/2, roll_final/2
+        # 两步法逻辑不变
         L_roll = -roll_final/2
         R_roll = -roll_final/2
 
-        # 步骤2：叠加pitch_final
         L_pitch = pitch_final
         R_pitch = - pitch_final
-        # 计算最终角度
+
         L_final = L_roll + L_pitch
         R_final = R_roll + R_pitch
 
-        # 最终一次性下发命令到电机
+        # 同时下发
         await asyncio.gather(
             self.motor_left.set_position(L_final),
             self.motor_right.set_position(R_final)
         )
 
     async def print_euler_angles(self):
-        """定期打印当前欧拉角(roll, pitch, yaw)"""
+        """定期打印当前欧拉角"""
         try:
             while self.running:
                 await asyncio.sleep(0.1)
@@ -160,18 +152,16 @@ class GimbalController:
 
     def calculate_euler_angles(self, L: float, R: float):
         """
-        pitch=(L-R), roll=(L+R), yaw=0
-        L,R为电机当前弧度
+        根据L,R计算欧拉角，不改变逻辑。
         """
         euler_angles = self.compute_final(L, R)
-
         self.euler_angles['roll'] = euler_angles[0]
         self.euler_angles['pitch'] = euler_angles[1]
         self.euler_angles['yaw'] = 0.0
 
     def compute_final(self, L_final: float, R_final: float):
         """
-        给定最终电机角度 L_final 和 R_final，求出 roll_final 和 pitch_final。
+        给定L,R求roll,pitch,yaw，不改变逻辑。
         """
         roll_final = -(L_final + R_final)
         pitch_final = (L_final - R_final) / 2.0
@@ -202,18 +192,17 @@ class GimbalController:
 
 def main():
     """主函数，创建云台控制器并运行"""
-    # 根据实际情况调整CAN ID和串口
     motor_left = CyberGearMotor(
         can_id=127,
         serial_port='COM5',
         master_id=0x00FD,
-        position_request_interval=1
+        position_request_interval=1  # 不改变原有逻辑和参数
     )
     motor_right = CyberGearMotor(
         can_id=127,
         serial_port='COM4',
         master_id=0x00FD,
-        position_request_interval=1/30
+        position_request_interval=1/30  # 不改变原有逻辑和参数
     )
 
     print("请选择运行模式:")
