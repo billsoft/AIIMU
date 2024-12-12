@@ -10,7 +10,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class GimbalController:
-    """云台控制器类：对模式1增加等待时间减少抖动，对模式6实现俯仰与滚转正弦交替。"""
+    """
+    云台控制器类：
+    - 模式1增加等待时间避免抖动。
+    - 模式6通过一个10秒周期设计，实现俯仰正弦与滚转正弦的平滑过渡，无跳变。
+    """
     MODE_2DOF_RANDOM = '2dof_random'
     MODE_PITCH_RANDOM = 'pitch_random'
     MODE_PITCH_SINE = 'pitch_sine'
@@ -27,10 +31,9 @@ class GimbalController:
         self.control_task = None
         self.print_task = None
 
-        # 提高电机速度，使运动更顺畅
+        # 提高速度减少滞后
         self.default_speed = 5.0
-
-        # 总的更新间隔略减少，让运动更平滑
+        # 基本更新间隔
         self.base_interval = 0.05
 
     async def start(self):
@@ -41,14 +44,14 @@ class GimbalController:
         )
         await asyncio.sleep(0.01)
 
-        # 重置电机圈数
+        # 重置圈数
         await asyncio.gather(
             self.motor_left.reset_rotation(),
             self.motor_right.reset_rotation()
         )
         await asyncio.sleep(0.01)
 
-        # 设置电机零位
+        # 设置零位
         await asyncio.gather(
             self.motor_left.set_zero_position(),
             self.motor_right.set_zero_position()
@@ -66,25 +69,28 @@ class GimbalController:
 
     async def control_loop(self):
         """
-        控制循环：
-        - 对模式1（2自由度随机）在下达指令后增加稍长的等待时间(如0.3秒)，让电机有时间接近目标，减小抖动。
-        - 对模式6进行俯仰正弦与滚转正弦5秒交替，实现真正的2自由度交替正弦运动。
+        对模式6进行特殊处理：
+        定义一个10s周期：
+        0~5s: pitch正弦，roll=0
+        5s时pitch峰值约0.359，此时roll从同样的角度开始正弦，pitch不立刻变0，而是在5~5.5s间线性淡出到0，
+        roll正弦自然进行，不产生跳变
+        5.5~10s：仅roll正弦运动，到10s roll回归0，下个周期再从pitch开始
         """
         try:
             while self.running:
                 if self.mode == self.MODE_2DOF_RANDOM:
-                    # 二自由度随机运动：发出随机指令后等待0.3秒，给电机反应时间
+                    # 等待时间加长，给电机完成动作余裕，减少抖动
                     pitch_final = random.uniform(-0.6, 0.6)
                     roll_final = random.uniform(-0.6, 0.6)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.3)  # 增加等待，减少抖动
+                    await asyncio.sleep(0.3)
                     continue
 
                 elif self.mode == self.MODE_PITCH_RANDOM:
                     pitch_final = random.uniform(-0.6, 0.6)
                     roll_final = 0.0
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.3)
                     continue
 
                 elif self.mode == self.MODE_PITCH_SINE:
@@ -99,7 +105,7 @@ class GimbalController:
                     pitch_final = 0.0
                     roll_final = random.uniform(-0.6, 0.6)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.3)
                     continue
 
                 elif self.mode == self.MODE_ROLL_SINE:
@@ -111,16 +117,35 @@ class GimbalController:
                     continue
 
                 elif self.mode == self.MODE_LEVEL_ROLL_SEEK_EAST:
-                    # 6是3和5的结合，即俯仰正弦与滚转正弦交替5秒切换
+                    # 10s周期，分成3段
                     t = asyncio.get_event_loop().time()
-                    if int(t) % 10 < 5:
-                        # 前5秒俯仰正弦运动
-                        pitch_final = 0.6 * math.sin(0.5 * t)
+                    tc = t % 10.0  # 周期内时间
+
+                    # 在t=5秒时pitch达到峰值0.359左右，我们为roll引入相位来匹配此初始值。
+                    # 计算φ满足roll(5s)=pitch(5s)
+                    # pitch(5s)=0.6*sin(0.5*5)=0.6*sin(2.5)≈0.359
+                    # roll(t)=0.6*sin(0.5*(t-5)+φ)，要求roll(5)=0.359
+                    # =>0.359=0.6*sin(φ) => φ=arcsin(0.359/0.6)≈0.64弧度
+                    φ = 0.64
+
+                    if tc < 5:
+                        # 前5秒：pitch正弦, roll=0
+                        pitch_final = 0.6 * math.sin(0.5 * tc)
                         roll_final = 0.0
+                    elif 5 <= tc < 5.5:
+                        # 5~5.5秒：pitch从0.359线性减为0, roll从0.359继续正弦
+                        # pitch(5)=0.359
+                        # 在0.5秒内线性衰减到0：pitch_final=0.359*(1 - (tc-5)/0.5)
+                        pitch_peak = 0.6 * math.sin(2.5) # ≈0.359
+                        fade_ratio = 1 - (tc - 5)/0.5
+                        pitch_final = pitch_peak * fade_ratio
+
+                        # roll从0.359平滑继续
+                        roll_final = 0.6 * math.sin(0.5*(tc - 5) + φ)
                     else:
-                        # 后5秒滚转正弦运动
+                        # 5.5~10秒：pitch=0, roll继续正弦直到回到0
                         pitch_final = 0.0
-                        roll_final = 0.6 * math.sin(0.5 * t)
+                        roll_final = 0.6 * math.sin(0.5*(tc - 5) + φ)
 
                     await self.one_shot_set_positions(pitch_final, roll_final)
                     await asyncio.sleep(0.01)
@@ -132,9 +157,7 @@ class GimbalController:
             pass
 
     async def one_shot_set_positions(self, pitch_final: float, roll_final: float):
-        """
-        与之前一样逻辑，只是保证速度较高(default_speed=5.0)以减少滞后。
-        """
+        # 与此前逻辑相同，只是加了一个较大的速度参数
         L_roll = -roll_final / 2
         R_roll = -roll_final / 2
         L_pitch = pitch_final
@@ -148,9 +171,7 @@ class GimbalController:
         )
 
     async def print_euler_angles(self):
-        """
-        稍微减少间隔，提升观测频率。
-        """
+        # 打印间隔略小一些，观测更流畅
         try:
             while self.running:
                 await asyncio.sleep(0.05)
@@ -226,7 +247,7 @@ def main():
     print("3. 俯仰正弦往复运动")
     print("4. 滚转运动")
     print("5. 滚转正弦运动")
-    print("6. 水平、滚转正弦交替切换运动")
+    print("6. 水平、滚转正弦交替切换运动(平滑衔接)")
     mode_input = input("请输入模式编号 (1-6): ")
 
     mode_map = {
