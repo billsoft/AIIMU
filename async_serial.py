@@ -1,16 +1,10 @@
-# async_serial.py
-
-"""
-异步串口通信类，处理串口连接和数据收发，使用事件回调机制。
-"""
-
 import asyncio
 import serial_asyncio
 from typing import Optional, Callable
 from logger import Logger
 
 class AsyncSerial(asyncio.Protocol):
-    """异步串口通信类"""
+    """异步串口通信类，增加线程安全的发送方法。"""
 
     def __init__(
         self,
@@ -21,20 +15,22 @@ class AsyncSerial(asyncio.Protocol):
         on_frame_received: Optional[Callable[[bytes], None]] = None,
         logger: Optional[Logger] = None
     ):
-        self.port = port                                  # 串口端口
-        self.baudrate = baudrate                          # 波特率
-        self.stopbits = stopbits                          # 停止位
-        self.parity = parity                              # 校验位
-        self.transport = None                             # 传输层
-        self.on_frame_received = on_frame_received        # 帧接收回调
-        self._buffer = bytearray()                        # 接收缓冲区
-        self._connected = False                           # 连接状态
-        self.logger = logger                              # 日志记录器
+        self.port = port
+        self.baudrate = baudrate
+        self.stopbits = stopbits
+        self.parity = parity
+        self.transport = None
+        self.on_frame_received = on_frame_received
+        self._buffer = bytearray()
+        self._connected = False
+        self.logger = logger
+        self._loop = None  # 用于call_soon_threadsafe回调
 
     async def connect(self):
         """连接串口"""
         try:
             loop = asyncio.get_event_loop()
+            self._loop = loop
             self.transport, _ = await serial_asyncio.create_serial_connection(
                 loop,
                 lambda: self,
@@ -75,23 +71,45 @@ class AsyncSerial(asyncio.Protocol):
             frame = self._buffer[start:end + 2]
             del self._buffer[:end + 2]
 
-            # 日志记录
             if self.logger:
                 asyncio.create_task(self.logger.log_received(frame))
 
-            # 回调处理接收到的帧
             if self.on_frame_received:
                 self.on_frame_received(frame)
 
     async def send_frame(self, frame: bytes):
-        """发送数据帧"""
+        """异步发送数据帧（原有方法，不删除）"""
         if self._connected and self.transport:
             self.transport.write(frame)
-            # 日志记录
             if self.logger:
                 await self.logger.log_send(frame)
         else:
             print("串口未连接")
+
+    async def send_frame_threadsafe(self, frame: bytes):
+        """
+        新增的线程安全异步发送方法:
+        即使在多线程环境调用此方法，也不会直接在其他线程调用transport.write，
+        而是使用call_soon_threadsafe在主事件循环中执行写操作。
+        """
+        if not self._connected or self.transport is None:
+            print("串口未连接")
+            return
+
+        loop = self._loop
+        future = loop.create_future()
+
+        def do_write():
+            self.transport.write(frame)
+            # 写入完成后通知future
+            loop.call_soon_threadsafe(future.set_result, None)
+
+        # 调度写入回到事件循环线程安全执行
+        loop.call_soon_threadsafe(do_write)
+        await future
+
+        if self.logger:
+            await self.logger.log_send(frame)
 
     async def close(self):
         """关闭串口连接"""

@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class GimbalController:
-    """云台控制器类，控制俯仰(pitch)和滚转(roll)"""
+    """云台控制器类，不改变原有逻辑，只是最终命令下发更容易并行化。"""
     MODE_2DOF_RANDOM = '2dof_random'
     MODE_PITCH_RANDOM = 'pitch_random'
     MODE_PITCH_SINE = 'pitch_sine'
@@ -59,9 +59,6 @@ class GimbalController:
             pass
 
     async def control_loop(self):
-        """
-        控制循环，根据模式产生目标pitch和roll，然后一次性下发L,R指令到电机。
-        """
         try:
             while self.running:
                 if self.mode == self.MODE_2DOF_RANDOM:
@@ -109,26 +106,23 @@ class GimbalController:
 
     async def one_shot_set_positions(self, pitch_final: float, roll_final: float):
         """
-        一次性下发电机位置指令，不改变原有计算逻辑和功能。
+        逻辑不变：计算最终L,R角度，然后同时给两个电机下发指令。
+        因为底层已并行化执行，这里的gather会真正并行从而减少不同步。
         """
-        # 两步法逻辑不变
+        # 计算步骤不变
         L_roll = -roll_final/2
         R_roll = -roll_final/2
-
         L_pitch = pitch_final
         R_pitch = - pitch_final
-
         L_final = L_roll + L_pitch
         R_final = R_roll + R_pitch
 
-        # 同时下发
         await asyncio.gather(
             self.motor_left.set_position(L_final),
             self.motor_right.set_position(R_final)
         )
 
     async def print_euler_angles(self):
-        """定期打印当前欧拉角"""
         try:
             while self.running:
                 await asyncio.sleep(0.1)
@@ -151,20 +145,14 @@ class GimbalController:
             pass
 
     def calculate_euler_angles(self, L: float, R: float):
-        """
-        根据L,R计算欧拉角，不改变逻辑。
-        """
         euler_angles = self.compute_final(L, R)
         self.euler_angles['roll'] = euler_angles[0]
         self.euler_angles['pitch'] = euler_angles[1]
         self.euler_angles['yaw'] = 0.0
 
     def compute_final(self, L_final: float, R_final: float):
-        """
-        给定L,R求roll,pitch,yaw，不改变逻辑。
-        """
         roll_final = -(L_final + R_final)
-        pitch_final = (L_final - R_final) / 2.0
+        pitch_final = (L_final - R_final)/2.0
         return roll_final, pitch_final, 0.0
 
     async def stop(self):
@@ -191,18 +179,17 @@ class GimbalController:
         )
 
 def main():
-    """主函数，创建云台控制器并运行"""
     motor_left = CyberGearMotor(
         can_id=127,
         serial_port='COM5',
         master_id=0x00FD,
-        position_request_interval=1  # 不改变原有逻辑和参数
+        position_request_interval=1  # 保持原有逻辑和参数不变
     )
     motor_right = CyberGearMotor(
         can_id=127,
         serial_port='COM4',
         master_id=0x00FD,
-        position_request_interval=1/30  # 不改变原有逻辑和参数
+        position_request_interval=1/30  # 保持原有逻辑和参数不变
     )
 
     print("请选择运行模式:")
