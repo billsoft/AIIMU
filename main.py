@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class GimbalController:
-    """云台控制器类，不改变原有逻辑，只是最终命令下发更容易并行化。"""
+    """云台控制器类：对模式1增加等待时间减少抖动，对模式6实现俯仰与滚转正弦交替。"""
     MODE_2DOF_RANDOM = '2dof_random'
     MODE_PITCH_RANDOM = 'pitch_random'
     MODE_PITCH_SINE = 'pitch_sine'
@@ -26,6 +26,12 @@ class GimbalController:
         self.euler_angles = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
         self.control_task = None
         self.print_task = None
+
+        # 提高电机速度，使运动更顺畅
+        self.default_speed = 5.0
+
+        # 总的更新间隔略减少，让运动更平滑
+        self.base_interval = 0.05
 
     async def start(self):
         """启动云台控制器并初始化电机"""
@@ -54,78 +60,100 @@ class GimbalController:
 
         try:
             while self.running:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(self.base_interval)
         except asyncio.CancelledError:
             pass
 
     async def control_loop(self):
+        """
+        控制循环：
+        - 对模式1（2自由度随机）在下达指令后增加稍长的等待时间(如0.3秒)，让电机有时间接近目标，减小抖动。
+        - 对模式6进行俯仰正弦与滚转正弦5秒交替，实现真正的2自由度交替正弦运动。
+        """
         try:
             while self.running:
                 if self.mode == self.MODE_2DOF_RANDOM:
+                    # 二自由度随机运动：发出随机指令后等待0.3秒，给电机反应时间
                     pitch_final = random.uniform(-0.6, 0.6)
                     roll_final = random.uniform(-0.6, 0.6)
+                    await self.one_shot_set_positions(pitch_final, roll_final)
+                    await asyncio.sleep(0.3)  # 增加等待，减少抖动
+                    continue
+
                 elif self.mode == self.MODE_PITCH_RANDOM:
                     pitch_final = random.uniform(-0.6, 0.6)
                     roll_final = 0.0
+                    await self.one_shot_set_positions(pitch_final, roll_final)
+                    await asyncio.sleep(0.1)
+                    continue
+
                 elif self.mode == self.MODE_PITCH_SINE:
                     t = asyncio.get_event_loop().time()
                     pitch_final = 0.6 * math.sin(0.5 * t)
                     roll_final = 0.0
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0.01)
                     continue
+
                 elif self.mode == self.MODE_ROLL:
                     pitch_final = 0.0
                     roll_final = random.uniform(-0.6, 0.6)
+                    await self.one_shot_set_positions(pitch_final, roll_final)
+                    await asyncio.sleep(0.1)
+                    continue
+
                 elif self.mode == self.MODE_ROLL_SINE:
                     t = asyncio.get_event_loop().time()
                     pitch_final = 0.0
                     roll_final = 0.6 * math.sin(0.5 * t)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0)
-                    continue
-                elif self.mode == self.MODE_LEVEL_ROLL_SEEK_EAST:
-                    t = asyncio.get_event_loop().time()
-                    if int(t) % 10 < 5:
-                        pitch_final = 0.0
-                        roll_final = 0.0
-                    else:
-                        pitch_final = 0.0
-                        roll_final = 0.6 * math.sin(0.5 * t)
-                    await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0)
-                    continue
-                else:
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0.01)
                     continue
 
-                await self.one_shot_set_positions(pitch_final, roll_final)
-                await asyncio.sleep(0)
+                elif self.mode == self.MODE_LEVEL_ROLL_SEEK_EAST:
+                    # 6是3和5的结合，即俯仰正弦与滚转正弦交替5秒切换
+                    t = asyncio.get_event_loop().time()
+                    if int(t) % 10 < 5:
+                        # 前5秒俯仰正弦运动
+                        pitch_final = 0.6 * math.sin(0.5 * t)
+                        roll_final = 0.0
+                    else:
+                        # 后5秒滚转正弦运动
+                        pitch_final = 0.0
+                        roll_final = 0.6 * math.sin(0.5 * t)
+
+                    await self.one_shot_set_positions(pitch_final, roll_final)
+                    await asyncio.sleep(0.01)
+                    continue
+                else:
+                    await asyncio.sleep(0.01)
+                    continue
         except asyncio.CancelledError:
             pass
 
     async def one_shot_set_positions(self, pitch_final: float, roll_final: float):
         """
-        逻辑不变：计算最终L,R角度，然后同时给两个电机下发指令。
-        因为底层已并行化执行，这里的gather会真正并行从而减少不同步。
+        与之前一样逻辑，只是保证速度较高(default_speed=5.0)以减少滞后。
         """
-        # 计算步骤不变
-        L_roll = -roll_final/2
-        R_roll = -roll_final/2
+        L_roll = -roll_final / 2
+        R_roll = -roll_final / 2
         L_pitch = pitch_final
-        R_pitch = - pitch_final
+        R_pitch = -pitch_final
         L_final = L_roll + L_pitch
         R_final = R_roll + R_pitch
 
         await asyncio.gather(
-            self.motor_left.set_position(L_final),
-            self.motor_right.set_position(R_final)
+            self.motor_left.set_position(L_final, speed=self.default_speed),
+            self.motor_right.set_position(R_final, speed=self.default_speed)
         )
 
     async def print_euler_angles(self):
+        """
+        稍微减少间隔，提升观测频率。
+        """
         try:
             while self.running:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
                 angle_left = self.motor_left.get_real_time_position()
                 angle_right = self.motor_right.get_real_time_position()
                 if angle_left is None or angle_right is None:
@@ -152,7 +180,7 @@ class GimbalController:
 
     def compute_final(self, L_final: float, R_final: float):
         roll_final = -(L_final + R_final)
-        pitch_final = (L_final - R_final)/2.0
+        pitch_final = (L_final - R_final) / 2.0
         return roll_final, pitch_final, 0.0
 
     async def stop(self):
@@ -183,13 +211,13 @@ def main():
         can_id=127,
         serial_port='COM5',
         master_id=0x00FD,
-        position_request_interval=1  # 保持原有逻辑和参数不变
+        position_request_interval=1
     )
     motor_right = CyberGearMotor(
         can_id=127,
         serial_port='COM4',
         master_id=0x00FD,
-        position_request_interval=1/30  # 保持原有逻辑和参数不变
+        position_request_interval=1/30
     )
 
     print("请选择运行模式:")
