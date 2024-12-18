@@ -36,6 +36,7 @@ class CyberGearMotor:
         self.serial_port = serial_port
         self.serial = AsyncSerial(
             port=serial_port,
+            baudrate=921600,
             on_frame_received=self._on_frame_received,
         )
         self.control_task = None
