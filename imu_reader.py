@@ -194,7 +194,7 @@ async def main():
     imu_port = 'COM7'  # 根据实际情况修改
     imu_baudrate = 115200  # 确保与Arduino端匹配
     imu_output_file = "imu_data_debug.txt"
-    imu_max_lines = 20  # 测试时只写20行
+    imu_max_lines = 900  # 测试时只写900行
 
     try:
         imu_reader = IMUReader(
@@ -202,7 +202,7 @@ async def main():
             baudrate=imu_baudrate,
             output_file=imu_output_file,
             max_lines=imu_max_lines,
-            buffer_size=100,  # 设置缓冲区大小为100
+            buffer_size=27000,  # 设置缓冲区大小为27000
             auto_reset=True,  # 启用自动复位
             reset_delay=0.1    # 设置复位延迟时间为0.1秒
         )
