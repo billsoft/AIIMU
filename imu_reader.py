@@ -8,7 +8,6 @@ from typing import Optional
 from collections import deque
 from async_serial import AsyncSerial  # 确保此路径正确并存在
 
-
 # 设置IMUReader专用日志
 logger = logging.getLogger("IMUReader")
 logger.setLevel(logging.INFO)
@@ -17,13 +16,12 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-
 class IMUReader:
     """
     IMUReader类：
     1. 异步从串口读取IMU数据帧
     2. 使用正则解析Yaw, Pitch, Roll
-    3. 数据以"ATOrientation: Yaw: xxx, Pitch: yyy, Roll: zzz\r\n"格式输出
+    3. 数据以"AT,yaw,pitch,roll\r\n"格式输出
     4. 打印到控制台并记录到文件
     5. 可设max_lines限制，达到后自动停止
     6. 添加数据有效性检查
@@ -31,7 +29,7 @@ class IMUReader:
     8. 添加数据缓冲功能（可选）
     """
 
-    # 正则表达式修改为匹配"AT,yaw,pitch,roll"格式，并捕获Yaw, Pitch, Roll
+    # 正则表达式匹配"AT,yaw,pitch,roll"格式
     IMU_PATTERN = re.compile(
         r"AT,([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)"
     )
@@ -39,17 +37,17 @@ class IMUReader:
     def __init__(
         self,
         port: str,
-        baudrate: int = 115200,  # 确保与Arduino端匹配
+        baudrate: int = 460800,
         stopbits: int = 1,
         parity: str = 'N',
         output_file: str = "imu_data.txt",
         max_lines: Optional[int] = None,
         logger_instance: Optional[logging.Logger] = None,
-        buffer_size: int = 100,  # 新增参数：缓冲区大小
-        auto_reset: bool = True,  # 新增参数：是否自动复位
-        reset_delay: float = 0.1  # 新增参数：复位延迟时间
+        buffer_size: int = 100,
+        auto_reset: bool = True,
+        reset_delay: float = 0.1
     ):
-        # 初始化参数验证
+        # 参数验证
         if not port:
             raise ValueError("必须指定串口")
         if baudrate <= 0:
@@ -77,8 +75,8 @@ class IMUReader:
             parity=self.parity,
             on_frame_received=self.on_frame_received,
             logger=self.logger,
-            auto_reset=auto_reset,  # 传递自动复位参数
-            reset_delay=reset_delay  # 传递复位延迟参数
+            auto_reset=auto_reset,
+            reset_delay=reset_delay
         )
         self.file = None
 
@@ -108,7 +106,6 @@ class IMUReader:
         5. 存储数据到缓冲区
         """
         try:
-            # 如果已经停止，直接返回
             if not self.running:
                 return
 
@@ -120,40 +117,32 @@ class IMUReader:
                 pitch = float(match.group(2))
                 roll = float(match.group(3))
 
-                # 调整范围检查根据实际设备Yaw输出范围
-                # 假设Yaw在 [0, 360) 范围内，Pitch在 [-90, 90], Roll在 [-180, 180]
+                # 数据范围检查
                 if not (0 <= yaw < 360 and -90 <= pitch <= 90 and -180 <= roll <= 180):
-                    self.logger.warning(
-                        f"数据超出有效范围: Yaw={yaw}, Pitch={pitch}, Roll={roll}"
-                    )
+                    self.logger.warning(f"数据超出有效范围: Yaw={yaw}, Pitch={pitch}, Roll={roll}")
                     return
 
-                # 可选：将Yaw从 [0, 360) 转换到 [-180, 180)
+                # 将Yaw从 [0, 360) 转换到 [-180, 180)
                 if yaw >= 180:
                     yaw -= 360
                     self.logger.debug(f"转换后的Yaw: {yaw}")
 
                 timestamp = datetime.datetime.now().timestamp()
 
-                # 检查是否已达到最大行数限制
                 if self.max_lines and self.line_count >= self.max_lines:
-                    self.logger.info(
-                        f"已记录 {self.line_count} 行数据，达到最大行数限制，准备停止。"
-                    )
+                    self.logger.info(f"已记录 {self.line_count} 行数据，达到最大行数限制，准备停止。")
                     asyncio.create_task(self.stop())
-                    return  # 不再处理接收到的数据
+                    return
 
-                # 打印数据到控制台
-                print(
-                    f"Timestamp: {timestamp:.6f}s | Yaw: {yaw:.2f}° | Pitch: {pitch:.2f}° | Roll: {roll:.2f}°"
-                )
+                # 打印数据
+                print(f"Timestamp: {timestamp:.6f}s | Yaw: {yaw:.2f}° | Pitch: {pitch:.2f}° | Roll: {roll:.2f}°")
 
-                # 写入文件和更新行数
+                # 写入文件
                 if self.file:
                     self.file.write(f"{timestamp:.6f} {yaw:.2f} {pitch:.2f} {roll:.2f}\n")
                     self.line_count += 1
 
-                # 存储数据到缓冲区
+                # 存储到缓冲区
                 self.data_buffer.append({
                     'timestamp': timestamp,
                     'yaw': yaw,
@@ -183,7 +172,6 @@ class IMUReader:
         """
         return list(self.data_buffer)
 
-
 # 为测试和调试添加的 main 函数
 async def main():
     """
@@ -192,9 +180,9 @@ async def main():
     2. 记录数据，直到max_lines或用户中断
     """
     imu_port = 'COM7'  # 根据实际情况修改
-    imu_baudrate = 460800  # 确保与Arduino端匹配
+    imu_baudrate = 460800  # 与Arduino端匹配
     imu_output_file = "imu_data_debug.txt"
-    imu_max_lines = 500  # 测试时只写900行
+    imu_max_lines = 450  # 测试时只写500行
 
     try:
         imu_reader = IMUReader(
@@ -202,9 +190,9 @@ async def main():
             baudrate=imu_baudrate,
             output_file=imu_output_file,
             max_lines=imu_max_lines,
-            buffer_size=5000,  # 设置缓冲区大小为3600
-            auto_reset=True,  # 启用自动复位
-            reset_delay=0.1    # 设置复位延迟时间为0.1秒
+            buffer_size=4500,
+            auto_reset=True,
+            reset_delay=0.1
         )
     except ValueError as ve:
         logger.error(f"初始化IMUReader时发生错误：{ve}")
@@ -221,7 +209,6 @@ async def main():
         logger.error(f"IMUReader 调试时发生异常：{e}")
     finally:
         await imu_reader.stop()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

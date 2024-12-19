@@ -1,10 +1,10 @@
 /**
  * Genuino 101 + BMI150 IMU
- * 输出频率: 900Hz
+ * 输出频率: 450Hz
  * 使用MadgwickAHRS计算欧拉角(Yaw, Pitch, Roll)
  * 修改点：
- * - 频率提升至900Hz
- * - 波特率提升至460800以支持900Hz数据传输
+ * - 频率调整为450Hz
+ * - 波特率保持460800
  * - 输出格式保持"AT,yaw,pitch,roll\r\n"
  */
 
@@ -37,16 +37,16 @@ float convertRawGyro(int gRaw) {
 }
 
 void setup() {
-  Serial.begin(460800);  // 提升波特率到460800
+  Serial.begin(460800);  // 保持波特率460800
 
   CurieIMU.begin();
 
-  // 设置陀螺仪和加速度计采样频率为900Hz
-  CurieIMU.setGyroRate(900);
-  CurieIMU.setAccelerometerRate(900);
+  // 设置陀螺仪和加速度计采样频率为450Hz
+  CurieIMU.setGyroRate(450);
+  CurieIMU.setAccelerometerRate(450);
 
-  // 初始化Madgwick滤波器, 参数为更新频率900Hz
-  filter.begin(900);
+  // 初始化Madgwick滤波器, 参数为更新频率450Hz
+  filter.begin(450);
 
   // 设置加速度计 ±2G
   CurieIMU.setAccelerometerRange(2);
@@ -54,8 +54,8 @@ void setup() {
   CurieIMU.setGyroRange(250);
 
   // 计算采样间隔: 1秒=1000000微秒
-  // 900Hz频率 => 1/900秒约0.001111秒=1111微秒
-  microsPerReading = 1000000UL / 900UL;
+  // 450Hz频率 => 1/450秒约0.002222秒=2222微秒
+  microsPerReading = 1000000UL / 450UL;
   microsPrevious = micros();
 }
 
@@ -95,9 +95,3 @@ void loop() {
     microsPrevious += microsPerReading;
   }
 }
-
-
-//    # 正则表达式修改为匹配"AT,yaw,pitch,roll"格式，并捕获Yaw, Pitch, Roll
-//    IMU_PATTERN = re.compile(
-//        r"AT,([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)"
-//    )
