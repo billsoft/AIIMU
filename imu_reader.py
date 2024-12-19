@@ -31,9 +31,9 @@ class IMUReader:
     8. 添加数据缓冲功能（可选）
     """
 
-    # 正则表达式修改为匹配"ATOrientation:"开头，并捕获Yaw, Pitch, Roll
+    # 正则表达式修改为匹配"AT,yaw,pitch,roll"格式，并捕获Yaw, Pitch, Roll
     IMU_PATTERN = re.compile(
-        r"ATOrientation:\s*Yaw:\s*([+-]?\d+(?:\.\d+)?),\s*Pitch:\s*([+-]?\d+(?:\.\d+)?),\s*Roll:\s*([+-]?\d+(?:\.\d+)?)"
+        r"AT,([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)"
     )
 
     def __init__(
@@ -192,9 +192,9 @@ async def main():
     2. 记录数据，直到max_lines或用户中断
     """
     imu_port = 'COM7'  # 根据实际情况修改
-    imu_baudrate = 115200  # 确保与Arduino端匹配
+    imu_baudrate = 460800  # 确保与Arduino端匹配
     imu_output_file = "imu_data_debug.txt"
-    imu_max_lines = 900  # 测试时只写900行
+    imu_max_lines = 500  # 测试时只写900行
 
     try:
         imu_reader = IMUReader(
@@ -202,7 +202,7 @@ async def main():
             baudrate=imu_baudrate,
             output_file=imu_output_file,
             max_lines=imu_max_lines,
-            buffer_size=27000,  # 设置缓冲区大小为27000
+            buffer_size=5000,  # 设置缓冲区大小为3600
             auto_reset=True,  # 启用自动复位
             reset_delay=0.1    # 设置复位延迟时间为0.1秒
         )

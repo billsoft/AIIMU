@@ -3,8 +3,9 @@
  * 输出频率: 900Hz
  * 使用MadgwickAHRS计算欧拉角(Yaw, Pitch, Roll)
  * 修改点：
- * - 频率从1200Hz改为900Hz
- * - 输出格式改为以"AT"开头、"\r\n"结束，以适配您的AsyncSerial分包逻辑
+ * - 频率提升至900Hz
+ * - 波特率提升至460800以支持900Hz数据传输
+ * - 输出格式保持"AT,yaw,pitch,roll\r\n"
  */
 
 #include <CurieIMU.h>
@@ -36,7 +37,7 @@ float convertRawGyro(int gRaw) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(460800);  // 提升波特率到460800
 
   CurieIMU.begin();
 
@@ -80,18 +81,23 @@ void loop() {
     // 获取欧拉角(roll, pitch, yaw)
     float roll    = filter.getRoll();
     float pitch   = filter.getPitch();
-    float heading = filter.getYaw(); //作为yaw
+    float heading = filter.getYaw(); // 作为yaw
 
-    // 输出AT开头，\r\n结尾的格式
-    // 新格式："ATOrientation: Yaw: 123.45, Pitch: 67.89, Roll: -12.34\r\n"
-    Serial.print("ATOrientation: Yaw: ");
+    // 输出格式保持："AT,yaw值,pitch值,roll值\r\n"
+    Serial.print("AT,");
     Serial.print(heading, 2);
-    Serial.print(", Pitch: ");
+    Serial.print(",");
     Serial.print(pitch, 2);
-    Serial.print(", Roll: ");
+    Serial.print(",");
     Serial.print(roll, 2);
     Serial.print("\r\n");
 
     microsPrevious += microsPerReading;
   }
 }
+
+
+//    # 正则表达式修改为匹配"AT,yaw,pitch,roll"格式，并捕获Yaw, Pitch, Roll
+//    IMU_PATTERN = re.compile(
+//        r"AT,([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)"
+//    )
