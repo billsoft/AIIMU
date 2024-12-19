@@ -1,3 +1,4 @@
 pyserial
 pyserial-asyncio
 keyboard
+scipy
