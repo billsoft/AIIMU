@@ -182,7 +182,7 @@ async def main():
     imu_port = 'COM7'  # 根据实际情况修改
     imu_baudrate = 460800  # 与Arduino端匹配
     imu_output_file = "imu_data_debug.txt"
-    imu_max_lines = 450  # 测试时只写500行
+    imu_max_lines = 2250  # 测试时只写500行
 
     try:
         imu_reader = IMUReader(
