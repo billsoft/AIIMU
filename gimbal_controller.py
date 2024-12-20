@@ -195,7 +195,7 @@ class GimbalController:
                 pitch_deg = math.degrees(self.euler_angles['pitch'])
                 yaw_deg = math.degrees(self.euler_angles['yaw'])
 
-                logger.info(f"[Euler Angles] Timestamp: {asyncio.get_event_loop().time():.6f}s | "
+                logger.info(f"[Euler Angles] Timestamp: {datetime.datetime.now().timestamp():.6f}s | "
                             f"Yaw: {yaw_deg:.2f}° | Pitch: {pitch_deg:.2f}° | Roll: {roll_deg:.2f}°")
         except asyncio.CancelledError:
             logger.info("GimbalController 打印任务被取消。")
@@ -237,18 +237,27 @@ class GimbalController:
                 await self.print_task
             except asyncio.CancelledError:
                 logger.info("GimbalController 打印任务已取消。")
-        await asyncio.gather(
-            self.motor_left.emergency_stop(),
-            self.motor_right.emergency_stop()
-        )
-        await asyncio.gather(
-            self.motor_left.close(),
-            self.motor_right.close()
-        )
+        try:
+            await asyncio.gather(
+                self.motor_left.emergency_stop(),
+                self.motor_right.emergency_stop()
+            )
+            logger.info("已发送急停命令给所有电机。")
+        except Exception as e:
+            logger.error(f"发送急停命令时发生错误: {e}")
+
+        try:
+            await asyncio.gather(
+                self.motor_left.close(),
+                self.motor_right.close()
+            )
+            logger.info("已关闭所有电机连接。")
+        except Exception as e:
+            logger.error(f"关闭电机连接时发生错误: {e}")
         logger.info("GimbalController 已停止。")
 
 # 为测试和调试添加的 main 函数
-async def main():
+async def test_gimbal_controller():
     """
     测试GimbalController:
     1. 初始化电机
@@ -276,8 +285,8 @@ async def main():
     controller_task = asyncio.create_task(gimbal_controller.start())
 
     try:
-        # 运行5秒后停止
-        await asyncio.sleep(5)
+        # 运行10秒后停止
+        await asyncio.sleep(10)
     except KeyboardInterrupt:
         logger.info("测试程序被用户中断。")
     except Exception as e:
@@ -292,4 +301,4 @@ async def main():
             logger.info("GimbalController 任务已取消。")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(test_gimbal_controller())

@@ -37,14 +37,15 @@ class AsyncSerial(asyncio.Protocol):
             logger.setLevel(logging.DEBUG)  # 设置为DEBUG级别以记录更多信息
             ch = logging.StreamHandler()
             ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-            logger.addHandler(ch)
+            if not logger.handlers:
+                logger.addHandler(ch)
 
         self.logger = logger
         self._loop = None
 
     async def reset_device(self):
         """通过DTR线复位设备的异步方法"""
-        if not hasattr(self.transport, 'serial'):
+        if not hasattr(self.transport, 'serial') or self.transport.serial is None:
             self.logger.warning("无法访问串口控制信号")
             return
 
@@ -110,8 +111,12 @@ class AsyncSerial(asyncio.Protocol):
                 await self.reset_device()
             else:
                 # 确保DTR处于False状态，防止意外复位
-                if hasattr(self.transport, 'serial'):
-                    self.transport.serial.dtr = False
+                if hasattr(self.transport, 'serial') and self.transport.serial:
+                    try:
+                        self.transport.serial.dtr = False
+                        self.logger.debug("DTR已设置为False，防止意外复位")
+                    except Exception as e:
+                        self.logger.error(f"设置DTR为False时发生错误: {e}")
 
         except Exception as e:
             self.logger.error(f"串口连接失败: {e}")
@@ -120,7 +125,7 @@ class AsyncSerial(asyncio.Protocol):
     def connection_made(self, transport):
         """串口连接建立时的回调"""
         self.transport = transport
-        if hasattr(transport, 'serial'):
+        if hasattr(transport, 'serial') and transport.serial:
             self.logger.info(f"串口 {self.port} 已建立连接，DTR初始状态: {transport.serial.dtr}, RTS初始状态: {transport.serial.rts}")
         else:
             self.logger.warning(f"串口 {self.port} 已建立连接，但无法访问 'serial' 属性")
@@ -153,13 +158,23 @@ class AsyncSerial(asyncio.Protocol):
             self.logger.debug(f"Received frame: {frame}")
 
             if self.on_frame_received:
-                self.on_frame_received(frame)
+                # 确保 on_frame_received 是一个可调用对象
+                if callable(self.on_frame_received):
+                    try:
+                        self.on_frame_received(frame)
+                    except Exception as e:
+                        self.logger.error(f"处理接收到的帧时发生错误: {e}")
+                else:
+                    self.logger.warning("on_frame_received 不是一个可调用对象")
 
     async def send_frame(self, frame: bytes):
         """异步发送数据帧"""
         if self._connected and self.transport:
-            self.transport.write(frame)
-            self.logger.debug(f"Sent frame: {frame}")
+            try:
+                self.transport.write(frame)
+                self.logger.debug(f"Sent frame: {frame}")
+            except Exception as e:
+                self.logger.error(f"发送数据帧时发生错误: {e}")
         else:
             self.logger.warning("串口未连接，无法发送数据帧")
 
@@ -173,24 +188,46 @@ class AsyncSerial(asyncio.Protocol):
             return
 
         loop = self._loop
+        if loop is None:
+            self.logger.error("事件循环未初始化，无法发送数据帧")
+            return
+
         future = loop.create_future()
 
         def do_write():
-            self.transport.write(frame)
-            self.logger.debug(f"Threadsafe sent frame: {frame}")
-            loop.call_soon_threadsafe(future.set_result, None)
+            try:
+                self.transport.write(frame)
+                self.logger.debug(f"Threadsafe sent frame: {frame}")
+                loop.call_soon_threadsafe(future.set_result, None)
+            except Exception as e:
+                loop.call_soon_threadsafe(future.set_exception, e)
 
-        loop.call_soon_threadsafe(do_write)
-        await future
+        try:
+            loop.call_soon_threadsafe(do_write)
+            await future
+        except Exception as e:
+            self.logger.error(f"线程安全发送数据帧时发生错误: {e}")
 
     async def close(self):
         """关闭串口连接"""
         if self.transport:
-            if hasattr(self.transport, 'serial'):
-                # 关闭前确保DTR和RTS信号线处于安全状态
-                self.transport.serial.dtr = False
-                self.transport.serial.rts = False
-                self.logger.debug("DTR和RTS信号已重置为False")
-            self.transport.close()
-            self._connected = False
-            self.logger.info(f"串口 {self.port} 已关闭")
+            if hasattr(self.transport, 'serial') and self.transport.serial:
+                try:
+                    # 关闭前确保DTR和RTS信号线处于安全状态
+                    self.transport.serial.dtr = False
+                    self.transport.serial.rts = False
+                    self.logger.debug("DTR和RTS信号已重置为False")
+                except AttributeError as ae:
+                    self.logger.error(f"关闭串口 {self.port} 时发生 AttributeError: {ae}")
+                except Exception as e:
+                    self.logger.error(f"关闭串口 {self.port} 时发生错误: {e}")
+            else:
+                self.logger.warning(f"串口 {self.port} 已关闭或未连接。")
+            try:
+                self.transport.close()
+                self._connected = False
+                self.logger.info(f"串口 {self.port} 已关闭")
+            except Exception as e:
+                self.logger.error(f"关闭串口 {self.port} 时发生错误: {e}")
+        else:
+            self.logger.warning(f"串口 {self.port} 未连接或已关闭。")
