@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import math
-import datetime
 from imu_reader import IMUReader
 from gimbal_angle_reader import GimbalAngleReader
 from gimbal_controller import GimbalController
@@ -15,7 +14,7 @@ logger = logging.getLogger("Main")
 class DataSynchronizer:
     """
     数据同步类：
-    同步后生成包含9列的数据文本文件（.txt）：
+    同步后生成包含10列的数据文本文件（.txt）：
     Timestamp IMU_Roll IMU_Pitch IMU_Yaw Gimbal_Roll Gimbal_Pitch Gimbal_Yaw Diff_Roll Diff_Pitch Diff_Yaw
     """
 
@@ -31,6 +30,10 @@ class DataSynchronizer:
             f.write(header)
 
     def synchronize_and_write(self, record_duration: float):
+        """
+        同步IMU和云台的数据，并写入文本文件（.txt）。
+        :param record_duration: 用户输入的记录时长（秒，不包含前后缓冲）
+        """
         imu_data = self.imu_reader.get_buffer_data()
         gimbal_data = self.gimbal_reader.get_history_data()
 
@@ -40,13 +43,12 @@ class DataSynchronizer:
 
         gimbal_data_sorted = sorted(gimbal_data, key=lambda x: x[0])
 
-        # 使用较大的time_window提高匹配成功率
-        time_window = 0.1
+        # 使用较大的time_window以适应系统时间差异
+        time_window = 0.010  # 10ms
 
-        # IMU的时间范围：在前后各2秒的余量中间选出record_duration
-        # imu_data最早时间
+        # IMU的时间范围：在前后各3秒的余量中间选出record_duration
         imu_min_time = min(d['timestamp'] for d in imu_data)
-        imu_start_time = imu_min_time + 2  # 前2秒作为预热，不计入正式记录
+        imu_start_time = imu_min_time + 3  # 前3秒作为预热，不计入正式记录
         imu_end_time = imu_start_time + record_duration
 
         matched_count = 0
@@ -57,9 +59,11 @@ class DataSynchronizer:
                 if imu_timestamp < imu_start_time or imu_timestamp > imu_end_time:
                     continue
 
+                # 查找时间差在time_window内的gimbal数据
                 candidates = [g for g in gimbal_data_sorted if abs(g[0] - imu_timestamp) <= time_window]
                 if not candidates:
                     continue
+                # 选择时间差最小的gimbal数据
                 best_match = min(candidates, key=lambda x: abs(x[0] - imu_timestamp))
                 g_ts, g_yaw, g_pitch, g_roll = best_match
 
@@ -71,6 +75,7 @@ class DataSynchronizer:
                 gimbal_pitch = g_pitch
                 gimbal_yaw = g_yaw
 
+                # 差值
                 diff_roll = imu_roll - gimbal_roll
                 diff_pitch = imu_pitch - gimbal_pitch
                 diff_yaw = imu_yaw - gimbal_yaw
@@ -86,6 +91,20 @@ class DataSynchronizer:
             logger.warning(f"匹配数据行数 {matched_count} 少于期望的 {required_count} 行。建议延长记录时间或增加前后缓冲。")
 
 async def main():
+    """
+    主函数：
+    1. 用户选择运动模式
+    2. 用户输入记录持续时间
+    3. 初始化电机和控制器
+    4. 启动预热阶段
+    5. 启动正式记录阶段
+    6. 等待记录完成
+    7. 停止所有任务
+    8. 同步数据并输出
+    9. 安全退出
+    """
+
+    # 用户选择运行模式
     print("请选择运行模式:")
     print("1. 二自由度随机运动")
     print("2. 俯仰随机运动")
@@ -108,6 +127,7 @@ async def main():
     selected_mode = mode_map.get(mode_input, GimbalController.MODE_PITCH_RANDOM)
     logger.info(f"选择的运动模式: {selected_mode}")
 
+    # 用户输入记录持续时间（秒）
     while True:
         try:
             record_duration = float(input("请输入记录持续时间（秒）: "))
@@ -118,9 +138,14 @@ async def main():
         except ValueError:
             print("请输入一个有效的数字。")
 
-    # 增加更多余量，总共多4秒（前2秒预热 + 后2秒缓存）
-    total_duration = record_duration + 4
+    # 增加更多余量，总共多10秒（前5秒预热 + 后5秒缓冲）
+    preheat_time = 5
+    buffer_time = 5
+    total_duration = record_duration + preheat_time + buffer_time
 
+    logger.info(f"总记录时长为 {total_duration} 秒（包含前 {preheat_time} 秒预热和后 {buffer_time} 秒缓冲）。")
+
+    # 初始化电机，都设为1/45
     motor_left = CyberGearMotor(
         can_id=127,
         serial_port='COM5',
@@ -137,9 +162,9 @@ async def main():
     gimbal_controller = GimbalController(motor_left, motor_right, mode=selected_mode)
 
     # 根据total_duration计算需要的行数
-    # gimbal: 45Hz * (record_duration+4)
+    # gimbal: 45Hz * total_duration
     gimbal_records = int(45 * total_duration)
-    # imu: 450Hz * (record_duration+4)
+    # imu: 450Hz * total_duration
     imu_records = int(450 * total_duration)
 
     gimbal_angle_reader = GimbalAngleReader(
@@ -162,6 +187,7 @@ async def main():
         reset_delay=0.1
     )
 
+    # 启动云台控制器
     controller_task = asyncio.create_task(gimbal_controller.start())
 
     try:
@@ -175,14 +201,17 @@ async def main():
             pass
         return
 
-    # 开始云台记录器
+    # 启动数据记录
     await gimbal_angle_reader.start()
-    logger.info(f"开始记录总时长 {total_duration} 秒的数据（含前后余量）...")
+    await asyncio.sleep(preheat_time)
 
-    # 等待total_duration秒
-    await asyncio.sleep(total_duration)
+    logger.info(f"开始正式记录阶段，持续 {record_duration} 秒...")
+    await asyncio.sleep(record_duration)
 
-    # 停止IMU和云台记录
+    logger.info(f"开始缓冲阶段，持续 {buffer_time} 秒...")
+    await asyncio.sleep(buffer_time)
+
+    # 停止记录
     await imu_reader.stop()
     await gimbal_angle_reader.stop()
 
@@ -195,6 +224,7 @@ async def main():
 
     logger.info("数据记录完成，开始同步处理...")
 
+    # 同步数据并输出10列数据文件
     synchronizer = DataSynchronizer(imu_reader, gimbal_angle_reader, "synchronized_output.txt")
     synchronizer.synchronize_and_write(record_duration)
 
