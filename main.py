@@ -44,11 +44,11 @@ class DataSynchronizer:
         gimbal_data_sorted = sorted(gimbal_data, key=lambda x: x[0])
 
         # 使用较大的time_window以适应系统时间差异
-        time_window = 0.010  # 10ms
+        time_window = 0.015  # 15ms
 
-        # IMU的时间范围：在前后各3秒的余量中间选出record_duration
+        # IMU的时间范围：在前后各7秒的余量中间选出record_duration
         imu_min_time = min(d['timestamp'] for d in imu_data)
-        imu_start_time = imu_min_time + 3  # 前3秒作为预热，不计入正式记录
+        imu_start_time = imu_min_time + 7  # 前7秒作为预热，不计入正式记录
         imu_end_time = imu_start_time + record_duration
 
         matched_count = 0
@@ -62,6 +62,7 @@ class DataSynchronizer:
                 # 查找时间差在time_window内的gimbal数据
                 candidates = [g for g in gimbal_data_sorted if abs(g[0] - imu_timestamp) <= time_window]
                 if not candidates:
+                    logger.debug(f"IMU时间戳 {imu_timestamp:.6f} 没有匹配的云台数据。")
                     continue
                 # 选择时间差最小的gimbal数据
                 best_match = min(candidates, key=lambda x: abs(x[0] - imu_timestamp))
@@ -138,9 +139,9 @@ async def main():
         except ValueError:
             print("请输入一个有效的数字。")
 
-    # 增加更多余量，总共多10秒（前5秒预热 + 后5秒缓冲）
-    preheat_time = 5
-    buffer_time = 5
+    # 增加更多余量，总共多14秒（前7秒预热 + 后7秒缓冲）
+    preheat_time = 7
+    buffer_time = 7
     total_duration = record_duration + preheat_time + buffer_time
 
     logger.info(f"总记录时长为 {total_duration} 秒（包含前 {preheat_time} 秒预热和后 {buffer_time} 秒缓冲）。")
@@ -201,34 +202,40 @@ async def main():
             pass
         return
 
-    # 启动数据记录
-    await gimbal_angle_reader.start()
-    await asyncio.sleep(preheat_time)
-
-    logger.info(f"开始正式记录阶段，持续 {record_duration} 秒...")
-    await asyncio.sleep(record_duration)
-
-    logger.info(f"开始缓冲阶段，持续 {buffer_time} 秒...")
-    await asyncio.sleep(buffer_time)
-
-    # 停止记录
-    await imu_reader.stop()
-    await gimbal_angle_reader.stop()
-
-    # 停止云台控制器
-    controller_task.cancel()
     try:
-        await controller_task
-    except asyncio.CancelledError:
-        pass
+        # 启动数据记录
+        await gimbal_angle_reader.start()
+        await asyncio.sleep(preheat_time)
 
-    logger.info("数据记录完成，开始同步处理...")
+        logger.info(f"开始正式记录阶段，持续 {record_duration} 秒...")
+        await asyncio.sleep(record_duration)
 
-    # 同步数据并输出10列数据文件
-    synchronizer = DataSynchronizer(imu_reader, gimbal_angle_reader, "synchronized_output.txt")
-    synchronizer.synchronize_and_write(record_duration)
+        logger.info(f"开始缓冲阶段，持续 {buffer_time} 秒...")
+        await asyncio.sleep(buffer_time)
+    except Exception as e:
+        logger.error(f"运行过程中发生异常: {e}")
+    finally:
+        # 停止记录
+        await imu_reader.stop()
+        await gimbal_angle_reader.stop()
 
-    logger.info("程序已结束。")
+        # 停止云台控制器
+        controller_task.cancel()
+        try:
+            await controller_task
+        except asyncio.CancelledError:
+            pass
+
+        logger.info("数据记录完成，开始同步处理...")
+
+        # 同步数据并输出10列数据文件
+        synchronizer = DataSynchronizer(imu_reader, gimbal_angle_reader, "synchronized_output.txt")
+        synchronizer.synchronize_and_write(record_duration)
+
+        logger.info("程序已结束。")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(f"程序运行时发生未捕获的异常: {e}")
