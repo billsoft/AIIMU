@@ -98,12 +98,7 @@ class IMUReader:
 
     def on_frame_received(self, frame: bytes):
         """
-        串口数据接收回调函数：
-        1. 解码数据帧
-        2. 解析Yaw, Pitch, Roll
-        3. 数据有效性检查
-        4. 打印和记录数据
-        5. 存储数据到缓冲区
+        串口数据接收回调函数
         """
         try:
             if not self.running:
@@ -117,7 +112,7 @@ class IMUReader:
                 pitch = float(match.group(2))
                 roll = float(match.group(3))
 
-                # 数据范围检查
+                # 数据有效性检查
                 if not (0 <= yaw < 360 and -90 <= pitch <= 90 and -180 <= roll <= 180):
                     self.logger.warning(f"数据超出有效范围: Yaw={yaw}, Pitch={pitch}, Roll={roll}")
                     return
@@ -127,6 +122,7 @@ class IMUReader:
                     yaw -= 360
                     self.logger.debug(f"转换后的Yaw: {yaw}")
 
+                # 使用datetime.now().timestamp()统一时间戳
                 timestamp = datetime.datetime.now().timestamp()
 
                 if self.max_lines and self.line_count >= self.max_lines:
@@ -134,15 +130,12 @@ class IMUReader:
                     asyncio.create_task(self.stop())
                     return
 
-                # 打印数据
                 print(f"Timestamp: {timestamp:.6f}s | Yaw: {yaw:.2f}° | Pitch: {pitch:.2f}° | Roll: {roll:.2f}°")
 
-                # 写入文件
                 if self.file:
                     self.file.write(f"{timestamp:.6f} {yaw:.2f} {pitch:.2f} {roll:.2f}\n")
                     self.line_count += 1
 
-                # 存储到缓冲区
                 self.data_buffer.append({
                     'timestamp': timestamp,
                     'yaw': yaw,
@@ -153,9 +146,6 @@ class IMUReader:
             self.logger.error(f"处理IMU数据时发生错误：{e}")
 
     async def stop(self):
-        """
-        停止读取IMU数据，关闭串口和文件。
-        """
         if not self.running:
             return
         self.running = False
@@ -166,23 +156,14 @@ class IMUReader:
         self.logger.info("IMUReader 已停止。")
 
     def get_buffer_data(self):
-        """
-        获取当前缓冲区的数据。
-        :return: 最近的IMU数据列表
-        """
         return list(self.data_buffer)
 
-# 为测试和调试添加的 main 函数
+# 测试main不动
 async def main():
-    """
-    独立测试IMUReader的main函数:
-    1. 创建IMUReader实例并连接IMU串口
-    2. 记录数据，直到max_lines或用户中断
-    """
-    imu_port = 'COM7'  # 根据实际情况修改
-    imu_baudrate = 460800  # 与Arduino端匹配
+    imu_port = 'COM7'
+    imu_baudrate = 460800
     imu_output_file = "imu_data_debug.txt"
-    imu_max_lines = 2250  # 测试时只写500行
+    imu_max_lines = 2250
 
     try:
         imu_reader = IMUReader(
@@ -190,7 +171,7 @@ async def main():
             baudrate=imu_baudrate,
             output_file=imu_output_file,
             max_lines=imu_max_lines,
-            buffer_size=4500,
+            buffer_size=45000,
             auto_reset=True,
             reset_delay=0.1
         )
