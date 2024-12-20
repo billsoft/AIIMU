@@ -35,9 +35,9 @@ class AsyncSerial(asyncio.Protocol):
         if logger is None:
             logger = logging.getLogger("AsyncSerial")
             logger.setLevel(logging.DEBUG)  # 设置为DEBUG级别以记录更多信息
-            ch = logging.StreamHandler()
-            ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
             if not logger.handlers:
+                ch = logging.StreamHandler()
+                ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
                 logger.addHandler(ch)
 
         self.logger = logger

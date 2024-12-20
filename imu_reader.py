@@ -44,7 +44,7 @@ class IMUReader:
         max_lines: Optional[int] = None,
         logger_instance: Optional[logging.Logger] = None,
         buffer_size: int = 100,
-        auto_reset: bool = True,
+        auto_reset: bool = True,   # 确保开启auto_reset，每次连接自动DTR复位
         reset_delay: float = 0.1
     ):
         # 参数验证
@@ -68,6 +68,7 @@ class IMUReader:
 
         self.logger = logger_instance if logger_instance else logger
 
+        # 使用auto_reset=True，确保每次connect后自动通过DTR复位Arduino 101
         self.serial = AsyncSerial(
             port=self.port,
             baudrate=self.baudrate,
@@ -98,7 +99,8 @@ class IMUReader:
 
     def on_frame_received(self, frame: bytes):
         """
-        串口数据接收回调函数
+        串口数据接收回调函数：
+        解析数据帧，如果匹配成功则打印和记录
         """
         try:
             if not self.running:
@@ -122,20 +124,24 @@ class IMUReader:
                     yaw -= 360
                     self.logger.debug(f"转换后的Yaw: {yaw}")
 
-                # 使用datetime.now().timestamp()统一时间戳
+                # 使用datetime.now().timestamp()作为时间戳
                 timestamp = datetime.datetime.now().timestamp()
 
+                # 检查是否达到最大行数
                 if self.max_lines and self.line_count >= self.max_lines:
                     self.logger.info(f"已记录 {self.line_count} 行数据，达到最大行数限制，准备停止。")
                     asyncio.create_task(self.stop())
                     return
 
+                # 打印数据到控制台
                 print(f"Timestamp: {timestamp:.6f}s | Yaw: {yaw:.2f}° | Pitch: {pitch:.2f}° | Roll: {roll:.2f}°")
 
+                # 写入文件
                 if self.file:
                     self.file.write(f"{timestamp:.6f} {yaw:.2f} {pitch:.2f} {roll:.2f}\n")
                     self.line_count += 1
 
+                # 存储数据到缓冲区
                 self.data_buffer.append({
                     'timestamp': timestamp,
                     'yaw': yaw,
@@ -146,21 +152,33 @@ class IMUReader:
             self.logger.error(f"处理IMU数据时发生错误：{e}")
 
     async def stop(self):
+        """
+        停止读取IMU数据，关闭串口和文件。
+        """
         if not self.running:
             return
         self.running = False
-        await self.serial.close()
+        await self.serial.close()  # AsyncSerial在close()中已确保DTR/RTS置为False
         if self.file:
             self.file.close()
             self.logger.info(f"文件 {self.output_file} 已关闭。")
         self.logger.info("IMUReader 已停止。")
 
     def get_buffer_data(self):
+        """
+        获取当前缓冲区的数据。
+        """
         return list(self.data_buffer)
 
-# 测试main不动
+
+# 测试main函数保持不变
 async def main():
-    imu_port = 'COM7'
+    """
+    独立测试IMUReader的main函数:
+    1. 创建IMUReader实例并连接IMU串口
+    2. 记录数据，直到max_lines或用户中断
+    """
+    imu_port = 'COM7'  # 根据实际情况修改
     imu_baudrate = 460800
     imu_output_file = "imu_data_debug.txt"
     imu_max_lines = 2250
@@ -172,7 +190,7 @@ async def main():
             output_file=imu_output_file,
             max_lines=imu_max_lines,
             buffer_size=45000,
-            auto_reset=True,
+            auto_reset=True,     # 确保在connect时自动通过DTR复位Arduino
             reset_delay=0.1
         )
     except ValueError as ve:
@@ -190,6 +208,7 @@ async def main():
         logger.error(f"IMUReader 调试时发生异常：{e}")
     finally:
         await imu_reader.stop()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
