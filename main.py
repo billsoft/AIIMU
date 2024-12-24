@@ -167,12 +167,12 @@ async def main():
     )
     imu_reader = IMUReader(
         port='COM7',
-        baudrate=460800,  # 或者230400, 具体看IMU端设置
+        baudrate=230400,  # 或者230400, 具体看IMU端设置
         output_file="imu_data.txt",
         max_lines=imu_records,
         buffer_size=imu_records*2,
         auto_reset=True,
-        reset_delay=0.1
+        reset_delay=0.2
     )
 
     # 启动云台控制
