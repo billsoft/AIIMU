@@ -1,16 +1,27 @@
 import asyncio
+import serial
 import serial_asyncio
 import logging
 import time
+import atexit
+import signal
 from typing import Optional, Callable
+
+def _default_logger(name="AsyncSerial", level=logging.DEBUG):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    if not logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(ch)
+    return logger
 
 class AsyncSerial(asyncio.Protocol):
     """
     异步串口通信类，支持自动复位功能（仅使用DTR）并可选看门狗机制来监控长时间无数据。
-    修改点：
-    1. 去掉 watchdog 中对 reset_device() 的调用，避免多次复位。
-    2. 在 reset_device() 中只在 connect() 时调用一次，且最后保持 DTR=True。
-    3. 优化 _process_buffer()，不盲目 clear()。
+    增强点：
+    1. 添加_force_cleanup_port() 函数，可在异常后再次启动前，强制打开->关闭一次串口，企图恢复。
+    2. 延长复位等待时长到3秒，并维持DTR=True。
     """
 
     def __init__(
@@ -23,8 +34,8 @@ class AsyncSerial(asyncio.Protocol):
             logger: Optional[logging.Logger] = None,
 
             # 复位相关
-            auto_reset: bool = False,  # 是否在 connect() 后自动通过DTR复位
-            reset_delay: float = 0.2,  # 修改点：稍微加大复位脉冲时间
+            auto_reset: bool = False,
+            reset_delay: float = 0.2,  # 每一步脉冲的时间
 
             # 看门狗相关
             use_watchdog: bool = False,
@@ -49,24 +60,66 @@ class AsyncSerial(asyncio.Protocol):
         self.transport: Optional[asyncio.Transport] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # 日志
         if logger is None:
-            logger = logging.getLogger("AsyncSerial")
-            logger.setLevel(logging.DEBUG)
-            if not logger.handlers:
-                ch = logging.StreamHandler()
-                ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-                logger.addHandler(ch)
+            logger = _default_logger()
         self.logger = logger
 
         self._frame_timeout = 0.1
         self._last_byte_time = 0.0
         self._watchdog_task: Optional[asyncio.Task] = None
 
+        # 注册 atexit，尝试温和退出
+        @atexit.register
+        def close_on_exit():
+            self.logger.debug("[AsyncSerial] atexit: trying to close port if open.")
+            if self._connected:
+                # 因为是同步函数，这里仅做简单处理
+                try:
+                    if self.transport:
+                        self.transport.close()
+                except:
+                    pass
+
+        # 注册信号处理器（只能拦截TERM/INT, 强杀无效）
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        self.logger.info(f"[AsyncSerial] Caught signal {signum}, will close port.")
+        if self._connected and self.transport:
+            try:
+                self.transport.close()
+            except:
+                pass
+        # 这里不能直接调用async函数，只能做简单处理
+
+    @staticmethod
+    def _force_cleanup_port(port: str, logger: logging.Logger):
+        """
+        强制打开->关闭一次串口，并设置 DTR=True，再关闭。
+        用于异常退出后再次启动时，尝试让底层驱动恢复。
+        """
+        logger.info(f"[AsyncSerial] force_cleanup_port: try open->close {port}")
+        try:
+            ser = serial.Serial(port, 9600, timeout=0.5)
+            ser.dtr = True
+            ser.rts = False
+            time.sleep(0.3)
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            ser.close()
+            logger.info(f"[AsyncSerial] force_cleanup_port done.")
+        except Exception as e:
+            logger.warning(f"[AsyncSerial] force_cleanup_port failed: {e}")
+
     async def connect(self):
         """异步连接串口并根据需要执行DTR复位。"""
+        self._loop = asyncio.get_event_loop()
+
+        # 先做一次强制清理（可选）
+        self._force_cleanup_port(self.port, self.logger)
+
         try:
-            self._loop = asyncio.get_event_loop()
             self.logger.info(f"[AsyncSerial] 连接 {self.port}@{self.baudrate}, auto_reset={self.auto_reset}")
             self.transport, _ = await serial_asyncio.create_serial_connection(
                 loop=self._loop,
@@ -79,18 +132,16 @@ class AsyncSerial(asyncio.Protocol):
             self._connected = True
             self.logger.info(f"[AsyncSerial] 串口 {self.port} 连接成功")
 
-            # 自动复位（只在连接后第一次做一次）
             if self.auto_reset:
                 await self.reset_device()
             else:
-                # 普通设备：只置DTR=True保持稳定（有些板子需要）
                 if hasattr(self.transport, 'serial') and self.transport.serial:
                     try:
+                        # 维持 DTR=True, 避免意外复位
                         self.transport.serial.dtr = True
                     except Exception as e:
                         self.logger.warning(f"[AsyncSerial] 设置DTR=True异常: {e}")
 
-            # 启动看门狗
             if self.use_watchdog:
                 self._watchdog_task = asyncio.create_task(self._watchdog_loop())
 
@@ -110,25 +161,24 @@ class AsyncSerial(asyncio.Protocol):
             orig_dtr = ser.dtr
             orig_rts = ser.rts
 
-            # Step1: DTR=False, RTS=False
             ser.dtr = False
             ser.rts = False
             await asyncio.sleep(self.reset_delay)
 
-            # Step2: DTR=True
             ser.dtr = True
             await asyncio.sleep(self.reset_delay)
 
-            # Step3: DTR=False
             ser.dtr = False
             await asyncio.sleep(self.reset_delay)
 
-            # 最后保持 DTR=True，避免板子一直复位
+            # 最后保持 DTR=True
             ser.dtr = True
-            ser.rts = orig_rts  # RTS 可恢复
+            ser.rts = orig_rts
 
-            self.logger.info("[AsyncSerial] 发送DTR复位脉冲完成, 等待2秒重启")
-            await asyncio.sleep(2.0)
+            # 等待更久，让Arduino 101有充分的枚举时间
+            wait_time = 3.0  # 修改：从2s增至3s或更长
+            self.logger.info(f"[AsyncSerial] 发送DTR复位脉冲完成, 等待{wait_time}秒重启")
+            await asyncio.sleep(wait_time)
 
         except Exception as e:
             self.logger.error(f"[AsyncSerial] reset_device异常: {e}")
@@ -178,32 +228,24 @@ class AsyncSerial(asyncio.Protocol):
     def data_received(self, data: bytes):
         """数据回调"""
         now = time.time()
-        # 若超过一定时间才来一批字节，则认为是新的帧
         if (now - self._last_byte_time) > self._frame_timeout and len(self._buffer) > 0:
-            self._buffer.clear()  # 可以适度清理，也可以保留部分
+            self._buffer.clear()
         self._last_byte_time = now
 
         self._buffer.extend(data)
         self._process_buffer()
 
     def _process_buffer(self):
-        """
-        查找 'AT'...'\r\n' 帧。
-        修改点：如果找不到 'AT'，不直接清空全部 buffer，
-        而是仅丢弃最前面无用的数据，以防止偶尔的分包丢失。
-        """
+        """查找 'AT'...'\r\n' 帧"""
         while True:
             start = self._buffer.find(b'AT')
             if start == -1:
-                # 若未找到“AT”，丢弃前面一部分，但保留一些，防止漏掉分包。
                 if len(self._buffer) > 10:
-                    # 例如仅保留末尾 10 个字节
                     self._buffer = self._buffer[-10:]
                 break
 
             end = self._buffer.find(b'\r\n', start)
             if end == -1:
-                # 找到 'AT' 但没有找到结尾，则先不动
                 break
 
             frame = self._buffer[start:end+2]
@@ -243,12 +285,11 @@ class AsyncSerial(asyncio.Protocol):
         await fut
 
     async def _watchdog_loop(self):
-        """看门狗协程。修改点：只打日志，不再调用 reset_device()"""
+        """看门狗协程，不再自动复位，只做超时警告"""
         while self._connected:
             await asyncio.sleep(self.watchdog_interval)
             now = time.time()
             if (now - self._last_byte_time) > self.no_data_timeout:
-                # 不去复位了，只提醒
                 self.logger.warning(
                     f"[AsyncSerial] 超过 {self.no_data_timeout}s 无数据，请检查设备或手动复位"
                 )
