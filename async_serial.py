@@ -7,6 +7,10 @@ from typing import Optional, Callable
 class AsyncSerial(asyncio.Protocol):
     """
     异步串口通信类，支持自动复位功能（仅使用DTR）并可选看门狗机制来监控长时间无数据。
+    修改点：
+    1. 去掉 watchdog 中对 reset_device() 的调用，避免多次复位。
+    2. 在 reset_device() 中只在 connect() 时调用一次，且最后保持 DTR=True。
+    3. 优化 _process_buffer()，不盲目 clear()。
     """
 
     def __init__(
@@ -20,12 +24,12 @@ class AsyncSerial(asyncio.Protocol):
 
             # 复位相关
             auto_reset: bool = False,  # 是否在 connect() 后自动通过DTR复位
-            reset_delay: float = 0.1,  # DTR复位脉冲时间
+            reset_delay: float = 0.2,  # 修改点：稍微加大复位脉冲时间
 
             # 看门狗相关
             use_watchdog: bool = False,
-            watchdog_interval: float = 2.0,
-            no_data_timeout: float = 5.0
+            watchdog_interval: float = 5.0,
+            no_data_timeout: float = 15.0
     ):
         self.port = port
         self.baudrate = baudrate
@@ -75,16 +79,16 @@ class AsyncSerial(asyncio.Protocol):
             self._connected = True
             self.logger.info(f"[AsyncSerial] 串口 {self.port} 连接成功")
 
-            # 自动复位
+            # 自动复位（只在连接后第一次做一次）
             if self.auto_reset:
                 await self.reset_device()
             else:
-                # 普通设备：只置DTR=False以防意外复位
+                # 普通设备：只置DTR=True保持稳定（有些板子需要）
                 if hasattr(self.transport, 'serial') and self.transport.serial:
                     try:
-                        self.transport.serial.dtr = False
+                        self.transport.serial.dtr = True
                     except Exception as e:
-                        self.logger.warning(f"[AsyncSerial] 设置DTR=False异常: {e}")
+                        self.logger.warning(f"[AsyncSerial] 设置DTR=True异常: {e}")
 
             # 启动看门狗
             if self.use_watchdog:
@@ -95,7 +99,7 @@ class AsyncSerial(asyncio.Protocol):
             raise
 
     async def reset_device(self):
-        """使用DTR复位，RTS在复位时暂时拉低。"""
+        """使用DTR复位，RTS在复位时暂时拉低。只在connect()时调用一次。"""
         if not (self.transport and hasattr(self.transport, 'serial') and self.transport.serial):
             self.logger.warning("[AsyncSerial] 无法访问底层serial进行DTR复位")
             return
@@ -119,9 +123,10 @@ class AsyncSerial(asyncio.Protocol):
             ser.dtr = False
             await asyncio.sleep(self.reset_delay)
 
-            # 恢复
-            ser.dtr = orig_dtr
-            ser.rts = orig_rts
+            # 最后保持 DTR=True，避免板子一直复位
+            ser.dtr = True
+            ser.rts = orig_rts  # RTS 可恢复
+
             self.logger.info("[AsyncSerial] 发送DTR复位脉冲完成, 等待2秒重启")
             await asyncio.sleep(2.0)
 
@@ -173,23 +178,32 @@ class AsyncSerial(asyncio.Protocol):
     def data_received(self, data: bytes):
         """数据回调"""
         now = time.time()
+        # 若超过一定时间才来一批字节，则认为是新的帧
         if (now - self._last_byte_time) > self._frame_timeout and len(self._buffer) > 0:
-            self._buffer.clear()
+            self._buffer.clear()  # 可以适度清理，也可以保留部分
         self._last_byte_time = now
 
         self._buffer.extend(data)
         self._process_buffer()
 
     def _process_buffer(self):
-        """查找 'AT'...'\r\n' 帧"""
+        """
+        查找 'AT'...'\r\n' 帧。
+        修改点：如果找不到 'AT'，不直接清空全部 buffer，
+        而是仅丢弃最前面无用的数据，以防止偶尔的分包丢失。
+        """
         while True:
             start = self._buffer.find(b'AT')
             if start == -1:
-                self._buffer.clear()
+                # 若未找到“AT”，丢弃前面一部分，但保留一些，防止漏掉分包。
+                if len(self._buffer) > 10:
+                    # 例如仅保留末尾 10 个字节
+                    self._buffer = self._buffer[-10:]
                 break
 
             end = self._buffer.find(b'\r\n', start)
             if end == -1:
+                # 找到 'AT' 但没有找到结尾，则先不动
                 break
 
             frame = self._buffer[start:end+2]
@@ -229,14 +243,12 @@ class AsyncSerial(asyncio.Protocol):
         await fut
 
     async def _watchdog_loop(self):
-        """看门狗协程"""
+        """看门狗协程。修改点：只打日志，不再调用 reset_device()"""
         while self._connected:
             await asyncio.sleep(self.watchdog_interval)
             now = time.time()
             if (now - self._last_byte_time) > self.no_data_timeout:
-                if self.auto_reset:
-                    await self.reset_device()
-                else:
-                    self.logger.warning(
-                        f"[AsyncSerial] 超过{self.no_data_timeout}s无数据,未启用auto_reset请检查"
-                    )
+                # 不去复位了，只提醒
+                self.logger.warning(
+                    f"[AsyncSerial] 超过 {self.no_data_timeout}s 无数据，请检查设备或手动复位"
+                )

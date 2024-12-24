@@ -4,8 +4,10 @@ import re
 import datetime
 from typing import Optional
 from collections import deque
+
+# 这里请注意 import 的文件名，如果 async_serial.py 放在同文件夹，需要改为 from async_serial import AsyncSerial
+# 我这里示范写法：
 from async_serial import AsyncSerial
-import time
 
 logger = logging.getLogger("IMUReader")
 logger.setLevel(logging.INFO)
@@ -38,7 +40,7 @@ class IMUReader:
         logger_instance: Optional[logging.Logger] = None,
         buffer_size: int = 100,
         auto_reset: bool = True,
-        reset_delay: float = 0.1
+        reset_delay: float = 0.2
     ):
         if not port:
             raise ValueError("必须指定port")
@@ -68,14 +70,17 @@ class IMUReader:
             parity=self.parity,
             on_frame_received=self.on_frame_received,
             logger=self.logger,
-            auto_reset=auto_reset,
-            reset_delay=reset_delay
+            auto_reset=auto_reset,   # 修改点：仅在最初连接一次复位，不会自动多次复位
+            reset_delay=reset_delay,
+            use_watchdog=False,      # 修改点：暂时关掉或禁用 watchdog，防止二次复位
+            watchdog_interval=5.0,
+            no_data_timeout=15.0
         )
 
         # 1级缓存（对外 get_buffer_data() 使用）
         self.data_buffer = deque(maxlen=buffer_size)
         # 2级队列（收帧回调只做 put_nowait）
-        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=buffer_size*2)
+        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=buffer_size * 2)
 
         self._processing_task: Optional[asyncio.Task] = None
         self.file = None
@@ -91,7 +96,7 @@ class IMUReader:
         self._processing_task = asyncio.create_task(self._process_loop())
 
     def on_frame_received(self, frame: bytes):
-        """串口回调：把帧扔到 _frame_queue，减轻回调阻塞。"""
+        """串口回调：把帧扔到 _frame_queue，减轻回调耗时。"""
         if not self.running:
             return
         try:
@@ -102,28 +107,32 @@ class IMUReader:
             self.logger.error(f"on_frame_received异常: {e}")
 
     async def _process_loop(self):
-        """后台协程:批量从队列取帧->解析->写文件->更新data_buffer"""
+        """后台协程：批量从队列取帧->解析->写文件->更新data_buffer"""
         self.logger.info("IMUReader 后台处理协程已启动")
         try:
             while self.running:
+                # 先阻塞等1帧
                 frame = await self._frame_queue.get()
                 self._handle_frame(frame)
 
                 # 一次最多再额外拿 50 帧
                 i = 0
                 while not self._frame_queue.empty() and i < 50:
-                    f = self._frame_queue.get_nowait()
-                    self._handle_frame(f)
-                    i += 1
+                    try:
+                        f = self._frame_queue.get_nowait()
+                        self._handle_frame(f)
+                        i += 1
+                    except asyncio.QueueEmpty:
+                        break
 
                 await asyncio.sleep(0)  # 让出事件循环
 
         except asyncio.CancelledError:
-            self.logger.info("IMUReader 后台处理协程被取消")
+            self.logger.info("IMUReader 后台协程被取消")
         except Exception as e:
             self.logger.error(f"IMUReader 后台协程异常: {e}")
         finally:
-            self.logger.info("IMUReader 后台处理协程结束")
+            self.logger.info("IMUReader 后台协程结束")
 
     def _handle_frame(self, frame: bytes):
         """解析并记录到文件 / data_buffer"""
@@ -147,8 +156,8 @@ class IMUReader:
             # 时间戳
             timestamp = datetime.datetime.now().timestamp()
 
+            # 达到上限后 stop()
             if self.max_lines and self.line_count >= self.max_lines:
-                # 达到上限后发起stop
                 asyncio.create_task(self.stop())
                 return
 
@@ -169,15 +178,15 @@ class IMUReader:
             self.logger.error(f"_handle_frame异常: {e}")
 
     async def stop(self):
-        """停止后台处理协程、关闭串口和文件。"""
+        """停止后台处理，让后台协程先处理完队列后再真正close串口、文件。"""
         if not self.running:
             return
         self.running = False
 
+        # 不直接cancel后台协程，给它时间drain队列
         if self._processing_task:
-            self._processing_task.cancel()
             try:
-                await self._processing_task
+                await self._processing_task  # 等它自己退出
             except asyncio.CancelledError:
                 pass
             self._processing_task = None
@@ -191,3 +200,46 @@ class IMUReader:
     def get_buffer_data(self):
         """对外提供 IMU 数据的接口。"""
         return list(self.data_buffer)
+
+
+# 测试main函数保持不变
+async def main():
+    """
+    独立测试IMUReader的main函数:
+    1. 创建IMUReader实例并连接IMU串口
+    2. 记录数据，直到max_lines或用户中断
+    """
+    imu_port = 'COM7'  # 根据实际情况修改
+    imu_baudrate = 230400
+    imu_output_file = "imu_data_debug.txt"
+    imu_max_lines = 50000
+
+    try:
+        imu_reader = IMUReader(
+            port=imu_port,
+            baudrate=imu_baudrate,
+            output_file=imu_output_file,
+            max_lines=imu_max_lines,
+            buffer_size=10000*10,
+            auto_reset=True,     # 只在connect时自动复位一次
+            reset_delay=0.2
+        )
+    except ValueError as ve:
+        logger.error(f"初始化IMUReader时发生错误：{ve}")
+        return
+
+    try:
+        await imu_reader.connect()
+        logger.info("开始独立调试 IMUReader（改为AT开头数据格式）...")
+        while imu_reader.running:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("测试程序被用户中断。")
+    except Exception as e:
+        logger.error(f"IMUReader 调试时发生异常：{e}")
+    finally:
+        await imu_reader.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
