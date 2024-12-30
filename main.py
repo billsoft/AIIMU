@@ -36,18 +36,16 @@ class DataSynchronizer:
             logger.warning("IMU或云台数据为空, 无法同步")
             return
 
-        # 将 gimbal_data(列表[tuple]) 转成 dict 方便匹配
+        # 将 gimbal_data(列表[dict]) 转成列表，方便匹配
         gimbal_list = []
         for item in gimbal_data:
-            # item: (ts, yaw_deg, pitch_deg, roll_deg)
-            # 若 gimbal_angles 存的是“度”，而 IMU 是“弧度”，则需要统一单位
-            # 例如：把云台角度转成“弧度”以对比 IMU
-            ts = item[0]
+            # item: {'timestamp': ts, 'roll': ..., 'pitch': ..., 'yaw': ...}
+            ts = item['timestamp']
             gimbal_list.append({
                 'timestamp': ts,
-                'yaw':   math.radians(item[1]),
-                'pitch': math.radians(item[2]),
-                'roll':  math.radians(item[3])
+                'yaw':   math.radians(item['yaw']),
+                'pitch': math.radians(item['pitch']),
+                'roll':  math.radians(item['roll'])
             })
 
         gimbal_list_sorted = sorted(gimbal_list, key=lambda x: x['timestamp'])
@@ -55,8 +53,8 @@ class DataSynchronizer:
 
         # IMU时间范围
         imu_min_time = min(d['timestamp'] for d in imu_data)
-        imu_start_time= imu_min_time + 7
-        imu_end_time  = imu_start_time + record_duration
+        imu_start_time = imu_min_time + 7
+        imu_end_time = imu_start_time + record_duration
 
         matched_count = 0
         with open(self.output_file, "a", encoding='utf-8') as f:
@@ -87,15 +85,26 @@ class DataSynchronizer:
                 diff_p = i_pitch - g_pitch
                 diff_y = i_yaw   - g_yaw
 
+                # 转换回度数用于记录
+                i_roll_deg = math.degrees(i_roll)
+                i_pitch_deg = math.degrees(i_pitch)
+                i_yaw_deg = math.degrees(i_yaw)
+                g_roll_deg = math.degrees(g_roll)
+                g_pitch_deg = math.degrees(g_pitch)
+                g_yaw_deg = math.degrees(g_yaw)
+                diff_r_deg = math.degrees(diff_r)
+                diff_p_deg = math.degrees(diff_p)
+                diff_y_deg = math.degrees(diff_y)
+
                 line = (f"{ts_imu:.6f} "
-                        f"{i_roll:.6f} {i_pitch:.6f} {i_yaw:.6f} "
-                        f"{g_roll:.6f} {g_pitch:.6f} {g_yaw:.6f} "
-                        f"{diff_r:.6f} {diff_p:.6f} {diff_y:.6f}\n")
+                        f"{i_roll_deg:.2f} {i_pitch_deg:.2f} {i_yaw_deg:.2f} "
+                        f"{g_roll_deg:.2f} {g_pitch_deg:.2f} {g_yaw_deg:.2f} "
+                        f"{diff_r_deg:.2f} {diff_p_deg:.2f} {diff_y_deg:.2f}\n")
                 f.write(line)
                 matched_count += 1
 
         logger.info(f"同步数据已写入 {self.output_file}, 匹配 {matched_count} 条.")
-        required = int(record_duration*450)
+        required = int(record_duration * 500)  # 修改为500Hz
         if matched_count < required:
             logger.warning(f"匹配行数 {matched_count} < 期望 {required}, "
                            "可延长记录或增大前后缓冲.")
@@ -142,22 +151,24 @@ async def main():
     total_time   = record_duration + preheat_time + buffer_time
     logger.info(f"总记录时长= {total_time}s (含前{preheat_time}秒预热+后{buffer_time}秒缓冲).")
 
+    # 初始化 CyberGearMotor 和 GimbalController
     motor_left = CyberGearMotor(
         can_id=127,
         serial_port='COM5',
         master_id=0x00FD,
-        position_request_interval=1/45
+        position_request_interval=1/50  # 修改为50Hz
     )
-    motor_right= CyberGearMotor(
+    motor_right = CyberGearMotor(
         can_id=127,
         serial_port='COM4',
         master_id=0x00FD,
-        position_request_interval=1/45
+        position_request_interval=1/50  # 修改为50Hz
     )
     gimbal_controller = GimbalController(motor_left, motor_right, mode=selected_mode)
 
-    gimbal_records = int(45*total_time)
-    imu_records    = int(450*total_time)
+    # 更新记录数量
+    gimbal_records = int(50 * total_time)  # 修改为50Hz
+    imu_records    = int(500 * total_time)  # 修改为500Hz
 
     # 读取器
     gimbal_angle_reader = GimbalAngleReader(
@@ -166,13 +177,14 @@ async def main():
         output_file="gimbal_angles.txt"
     )
     imu_reader = IMUReader(
-        port='COM7',
-        baudrate=230400,  # 或者230400, 具体看IMU端设置
-        output_file="imu_data.txt",
+        board_type="tdk42688",                # 添加 board_type 参数
+        port='COM11',                          # 修改为TDK陀螺仪的串口号
+        baudrate=921600,                       # 修改为TDK陀螺仪的波特率
+        output_file="tdk_imu_data.txt",        # 修改为TDK陀螺仪的输出文件
         max_lines=imu_records,
         buffer_size=imu_records*2,
-        auto_reset=True,
-        reset_delay=0.2
+        auto_reset=False,                      # TDK无需DTR复位
+        reset_delay=0.0                        # TDK无需复位延迟
     )
 
     # 启动云台控制
@@ -186,7 +198,8 @@ async def main():
         controller_task.cancel()
         try:
             await controller_task
-        except: pass
+        except:
+            pass
         return
 
     try:
@@ -214,7 +227,8 @@ async def main():
         controller_task.cancel()
         try:
             await controller_task
-        except: pass
+        except:
+            pass
 
         # 同步数据
         logger.info("记录结束, 开始数据同步...")

@@ -20,13 +20,13 @@ logger.addHandler(handler)
 class GimbalAngleReader:
     """
     云台角度读取器:
-    - 以 45Hz 读取电机弧度,计算 roll_rad, pitch_rad, yaw_rad
+    - 以 50Hz 读取电机弧度,计算 roll_rad, pitch_rad, yaw_rad
     - 转为度数后, 再存成 dict => {'timestamp':ts, 'roll':..., 'pitch':..., 'yaw':...}
     - 记录满 max_records 后做插值写文件
     - 提供 get_history_data() 返回 list[dict], dict格式=>{'timestamp':..., 'yaw':..., 'pitch':..., 'roll':...}
     """
 
-    def __init__(self, gimbal_controller: GimbalController, max_records: int = 315, output_file: str = "gimbal_angles.txt"):
+    def __init__(self, gimbal_controller: GimbalController, max_records: int = 350, output_file: str = "gimbal_angles.txt"):
         self.gimbal_controller = gimbal_controller
         self.running = False
         self.max_records = max_records
@@ -56,7 +56,7 @@ class GimbalAngleReader:
         logger.info("GimbalAngleReader 已停止。")
 
     async def _read_loop(self):
-        interval = 1.0 / 45.0
+        interval = 1.0 / 50.0  # 修改为50Hz
         while self.running and self.record_count < self.max_records:
             try:
                 current_time = datetime.datetime.now().timestamp()
@@ -127,12 +127,11 @@ class GimbalAngleReader:
         yaws = np.array([x['yaw'] for x in self.angle_history])
 
         # 创建插值函数
-        from scipy.interpolate import interp1d
         roll_interp = interp1d(timestamps, rolls, kind='linear', fill_value="extrapolate")
         pitch_interp = interp1d(timestamps, pitches, kind='linear', fill_value="extrapolate")
         yaw_interp = interp1d(timestamps, yaws, kind='linear', fill_value="extrapolate")
 
-        # 10倍插值
+        # 10倍插值 -> 500Hz
         new_ts = np.linspace(timestamps[0], timestamps[-1], self.max_records*10)
         new_rolls = roll_interp(new_ts)
         new_pitches = pitch_interp(new_ts)
@@ -153,28 +152,29 @@ class GimbalAngleReader:
 
 
 # 测试main
-async def main():
+async def test_gimbal_angle_reader():
     motor_left = CyberGearMotor(
         can_id=127,
         serial_port='COM5',
         master_id=0x00FD,
-        position_request_interval=1/45
+        position_request_interval=1/50  # 修改为50Hz
     )
     motor_right = CyberGearMotor(
         can_id=127,
         serial_port='COM4',
         master_id=0x00FD,
-        position_request_interval=1/45
+        position_request_interval=1/50  # 修改为50Hz
     )
     gimbal_controller = GimbalController(motor_left, motor_right, mode='pitch_random')
 
     controller_task = asyncio.create_task(gimbal_controller.start())
-    gimbal_angle_reader = GimbalAngleReader(gimbal_controller, max_records=315, output_file="gimbal_angles.txt")
+    gimbal_angle_reader = GimbalAngleReader(gimbal_controller, max_records=350, output_file="gimbal_angles.txt")  # 修改max_records
+
     await gimbal_angle_reader.start()
 
     try:
-        while gimbal_angle_reader.record_count < 315:
-            await asyncio.sleep(0.1)
+        while gimbal_angle_reader.record_count < 350:  # 修改为350
+            await asyncio.sleep(0.02)  # 1/50 sec
     finally:
         await gimbal_angle_reader.stop()
         controller_task.cancel()
@@ -184,4 +184,4 @@ async def main():
             pass
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(test_gimbal_angle_reader())
