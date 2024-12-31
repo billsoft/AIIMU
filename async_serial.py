@@ -4,7 +4,6 @@ import serial_asyncio
 import logging
 import time
 import atexit
-import signal
 from typing import Optional, Callable
 
 def _default_logger(name="AsyncSerial", level=logging.DEBUG):
@@ -79,19 +78,6 @@ class AsyncSerial(asyncio.Protocol):
                         self.transport.close()
                 except:
                     pass
-
-        # 注册信号处理器（只能拦截TERM/INT, 强杀无效）
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
-
-    def _signal_handler(self, signum, frame):
-        self.logger.info(f"[AsyncSerial] Caught signal {signum}, will close port.")
-        if self._connected and self.transport:
-            try:
-                self.transport.close()
-            except:
-                pass
-        # 这里不能直接调用async函数，只能做简单处理
 
     @staticmethod
     def _force_cleanup_port(port: str, logger: logging.Logger):

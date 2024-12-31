@@ -198,6 +198,7 @@ class CyberGearMotor:
             data=data
         )
         await self.send_message(message)
+        await asyncio.sleep(0.001)
         logger.info("电机已使能。")
 
     async def stop_motor(self):
@@ -210,6 +211,7 @@ class CyberGearMotor:
             data=data
         )
         await self.send_message(message)
+        await asyncio.sleep(0.001)
         logger.info("电机已停止。")
 
     async def emergency_stop(self):
