@@ -55,8 +55,10 @@ class CyberGearMotor:
             await self.serial.connect()
             self.is_connected = True
             logger.info(f"电机 {self.can_id} 连接到串口 {self.serial_port} 成功。")
-            await self.enable_motor()
-            await asyncio.sleep(0.001)
+
+            # 让USB转CAN模块进入命令模式 AT+AT\r\n
+            await self.serial.send_frame(b"AT+AT\r\n")
+
             logger.info(f"电机 {self.can_id} 链接有已经使能。")
             self.current_mode = Constants.RunMode['UNKNOWN']
             self.position_task = asyncio.create_task(self._real_time_feedback_loop())
