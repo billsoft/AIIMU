@@ -46,13 +46,16 @@ class GimbalAngleReader:
 
     async def stop(self):
         self.running = False
+        try:
+            await self.gimbal_controller.stop()
+        except Exception as e:
+            logger.error(f"停止 GimbalController 时发生错误: {e}")
         if self.read_task:
             self.read_task.cancel()
             try:
                 await self.read_task
             except asyncio.CancelledError:
                 logger.info("GimbalAngleReader 读取任务已取消。")
-        await self.gimbal_controller.stop()
         logger.info("GimbalAngleReader 已停止。")
 
     async def _read_loop(self):

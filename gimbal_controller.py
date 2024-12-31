@@ -72,21 +72,21 @@ class GimbalController:
                 self.motor_left.connect(),
                 self.motor_right.connect()
             )
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
             # 重置圈数
             await asyncio.gather(
                 self.motor_left.reset_rotation(),
                 self.motor_right.reset_rotation()
             )
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
             # 设置零位
             await asyncio.gather(
                 self.motor_left.set_zero_position(),
                 self.motor_right.set_zero_position()
             )
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
             self.control_task = asyncio.create_task(self.control_loop())
             self.print_task   = asyncio.create_task(self.print_euler_angles())
@@ -99,7 +99,16 @@ class GimbalController:
             logger.info("GimbalController 启动任务被取消。")
         except Exception as e:
             logger.error(f"GimbalController 启动时发生错误: {e}")
+        finally:
+            try:
+                await self.control_task
+                await self.print_task
+            except:
+                pass
+            await self.motor_left.stop_motor()
+            await self.motor_right.stop_motor()
             await self.stop()
+
 
     async def control_loop(self):
         """模式控制循环，根据 self.mode 执行不同动作，并控制发送频率。"""
@@ -118,7 +127,7 @@ class GimbalController:
                     pitch_final = random.uniform(-0.6, 0.6)
                     roll_final  = 0.0
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(1.0)
                     continue
 
                 elif self.mode == self.MODE_PITCH_SINE:
@@ -127,7 +136,7 @@ class GimbalController:
                     pitch_final = 0.6 * math.sin(0.5 * t)
                     roll_final  = 0.0
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.001)
                     continue
 
                 elif self.mode == self.MODE_ROLL:
@@ -135,7 +144,7 @@ class GimbalController:
                     pitch_final = 0.0
                     roll_final  = random.uniform(-0.6, 0.6)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(1.0)
                     continue
 
                 elif self.mode == self.MODE_ROLL_SINE:
@@ -144,7 +153,7 @@ class GimbalController:
                     pitch_final = 0.0
                     roll_final  = 0.6 * math.sin(0.5 * t)
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.001)
                     continue
 
                 elif self.mode == self.MODE_LEVEL_ROLL_SEEK_EAST:
@@ -165,7 +174,7 @@ class GimbalController:
                         roll_final  = 0.6 * math.sin(0.5*(tc-5) + φ)
 
                     await self.one_shot_set_positions(pitch_final, roll_final)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.001)
                     continue
 
                 elif self.mode == self.MODE_LEFT_DIAGONAL_SINE:
@@ -176,7 +185,7 @@ class GimbalController:
                     left_pos = 0.6 * math.sin(0.5 * t)
                     right_pos= 0.0
                     await self.one_shot_set_positions_LR(left_pos, right_pos)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.001)
                     continue
 
                 elif self.mode == self.MODE_RIGHT_DIAGONAL_SINE:
@@ -186,7 +195,7 @@ class GimbalController:
                     left_pos = 0.0
                     right_pos= 0.6 * math.sin(0.5 * t)
                     await self.one_shot_set_positions_LR(left_pos, right_pos)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.001)
                     continue
 
                 else:
@@ -289,6 +298,14 @@ class GimbalController:
     async def stop(self):
         """停止云台控制器、停止电机"""
         self.running = False
+        try:
+            await asyncio.gather(
+                self.motor_left.close(),
+                self.motor_right.close()
+            )
+            logger.info("已关闭所有电机连接。")
+        except Exception as e:
+            logger.error(f"关闭电机连接时发生错误: {e}")
         if self.control_task:
             self.control_task.cancel()
             try:
@@ -310,15 +327,6 @@ class GimbalController:
             logger.info("已发送急停命令给所有电机。")
         except Exception as e:
             logger.error(f"发送急停命令时发生错误: {e}")
-
-        try:
-            await asyncio.gather(
-                self.motor_left.close(),
-                self.motor_right.close()
-            )
-            logger.info("已关闭所有电机连接。")
-        except Exception as e:
-            logger.error(f"关闭电机连接时发生错误: {e}")
         logger.info("GimbalController 已停止。")
 
 
