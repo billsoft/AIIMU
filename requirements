@@ -3,3 +3,7 @@ pyserial-asyncio
 keyboard
 scipy
 pandas
+glfw
+vulkan
+PyOpenGL
+PyOpenGL_accelerate
