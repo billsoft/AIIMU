@@ -55,6 +55,9 @@ class CyberGearMotor:
             await self.serial.connect()
             self.is_connected = True
             logger.info(f"电机 {self.can_id} 连接到串口 {self.serial_port} 成功。")
+            await self.enable_motor()
+            await asyncio.sleep(0.001)
+            logger.info(f"电机 {self.can_id} 链接有已经使能。")
             self.current_mode = Constants.RunMode['UNKNOWN']
             self.position_task = asyncio.create_task(self._real_time_feedback_loop())
         except Exception as e:
@@ -79,7 +82,7 @@ class CyberGearMotor:
             except asyncio.CancelledError:
                 pass
         await self.stop_motor()
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.001)
         await self.serial.close()
         self.is_connected = False
         logger.info(f"电机 {self.can_id} 已关闭。")
@@ -88,7 +91,7 @@ class CyberGearMotor:
         """使用线程安全的方法进行发送"""
         frame = self.protocol_handler.encode_message(message, direction)
         # 使用新增的线程安全发送方式
-        await self.serial.send_frame_threadsafe(frame)
+        await self.serial.send_frame(frame)
         logger.debug(f"电机 {self.can_id} 发送消息: {frame.hex()}")
 
     async def set_zero_position(self):
@@ -102,7 +105,7 @@ class CyberGearMotor:
             data=data
         )
         await self.send_message(message)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
         logger.info("已发送设置机械零位命令。")
 
     async def set_param(self, param_name: str, value: Any):
@@ -133,7 +136,7 @@ class CyberGearMotor:
                 data=data
             )
             await self.send_message(message)
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.1)
 
             if param_name == 'RUN_MODE':
                 self.current_mode = value
@@ -164,15 +167,16 @@ class CyberGearMotor:
     async def set_position(self, position: float, speed: float = 2.0):
         if self.current_mode != Constants.RunMode['POSITION_MODE']:
             await self.stop_motor()
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)
             await self.set_run_mode(Constants.RunMode['POSITION_MODE'])
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)
             self.current_mode = Constants.RunMode['POSITION_MODE']
+            await self.enable_motor()
 
         await self.set_limit_spd(speed)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
         await self.set_loc_ref(position)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
         logger.info(f"已发送位置指令：{position} rad")
 
     def degrees_to_radians(self, degrees: float):
