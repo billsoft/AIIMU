@@ -31,16 +31,16 @@ class GimbalController:
       3. 新增 left_diagonal_sine / right_diagonal_sine 两种模式。
     """
 
-    MODE_2DOF_RANDOM        = '2dof_random'
-    MODE_PITCH_RANDOM       = 'pitch_random'
-    MODE_PITCH_SINE         = 'pitch_sine'
-    MODE_ROLL               = 'roll'
-    MODE_ROLL_SINE          = 'roll_sine'
-    MODE_LEVEL_ROLL_SEEK_EAST = 'level_roll_seek_east'
+    MODE_2DOF_RANDOM          = '2dof_random'
+    MODE_PITCH_RANDOM         = 'pitch_random'
+    MODE_PITCH_SINE           = 'pitch_sine'
+    MODE_ROLL                 = 'roll'
+    MODE_ROLL_SINE            = 'roll_sine'
+    MODE_LEVEL_ROLL_SEEK_EAST  = 'level_roll_seek_east'
 
     # 新增：
-    MODE_LEFT_DIAGONAL_SINE  = 'left_diagonal_sine'
-    MODE_RIGHT_DIAGONAL_SINE = 'right_diagonal_sine'
+    MODE_LEFT_DIAGONAL_SINE    = 'left_diagonal_sine'
+    MODE_RIGHT_DIAGONAL_SINE   = 'right_diagonal_sine'
 
     def __init__(self, motor_left: CyberGearMotor, motor_right: CyberGearMotor, mode='pitch_random'):
         self.motor_left = motor_left
@@ -88,27 +88,22 @@ class GimbalController:
             )
             await asyncio.sleep(0.001)
 
+            # 创建控制和打印任务
             self.control_task = asyncio.create_task(self.control_loop())
-            self.print_task   = asyncio.create_task(self.print_euler_angles())
+            self.print_task = asyncio.create_task(self.print_euler_angles())
 
             logger.info("GimbalController 已启动。")
 
-            # 等待两个任务结束（通常不会发生，除非被cancel或异常）
+            # 等待控制和打印任务结束（通常不会发生，除非被取消或异常）
             await asyncio.gather(self.control_task, self.print_task)
         except asyncio.CancelledError:
             logger.info("GimbalController 启动任务被取消。")
         except Exception as e:
             logger.error(f"GimbalController 启动时发生错误: {e}")
         finally:
-            try:
-                await self.control_task
-                await self.print_task
-            except:
-                pass
-            await self.motor_left.stop_motor()
-            await self.motor_right.stop_motor()
-            await self.stop()
-
+            # 不再在此处调用 self.stop()，避免重复取消和清理
+            # 清理逻辑将在外部调用 self.stop() 完成
+            pass
 
     async def control_loop(self):
         """模式控制循环，根据 self.mode 执行不同动作，并控制发送频率。"""
@@ -299,6 +294,7 @@ class GimbalController:
         """停止云台控制器、停止电机"""
         self.running = False
         try:
+            # 关闭电机连接
             await asyncio.gather(
                 self.motor_left.close(),
                 self.motor_right.close()
@@ -306,20 +302,25 @@ class GimbalController:
             logger.info("已关闭所有电机连接。")
         except Exception as e:
             logger.error(f"关闭电机连接时发生错误: {e}")
+
+        # 取消控制和打印任务
         if self.control_task:
             self.control_task.cancel()
             try:
                 await self.control_task
+                logger.info("GimbalController 控制任务已取消。")
             except asyncio.CancelledError:
                 logger.info("GimbalController 控制任务已取消。")
         if self.print_task:
             self.print_task.cancel()
             try:
                 await self.print_task
+                logger.info("GimbalController 打印任务已取消。")
             except asyncio.CancelledError:
                 logger.info("GimbalController 打印任务已取消。")
 
         try:
+            # 发送急停命令
             await asyncio.gather(
                 self.motor_left.emergency_stop(),
                 self.motor_right.emergency_stop()
@@ -328,36 +329,3 @@ class GimbalController:
         except Exception as e:
             logger.error(f"发送急停命令时发生错误: {e}")
         logger.info("GimbalController 已停止。")
-
-
-# ----------------- 测试main函数，可保留也可单独移除 ------------------ #
-async def test_gimbal_controller():
-    from cyber_gear_motor import CyberGearMotor
-    motor_left = CyberGearMotor(
-        can_id=127,
-        serial_port='COM5',
-        master_id=0x00FD,
-        position_request_interval=1/45
-    )
-    motor_right = CyberGearMotor(
-        can_id=127,
-        serial_port='COM4',
-        master_id=0x00FD,
-        position_request_interval=1/45
-    )
-
-    gimbal = GimbalController(motor_left, motor_right, mode=GimbalController.MODE_LEFT_DIAGONAL_SINE)
-    controller_task = asyncio.create_task(gimbal.start())
-
-    try:
-        await asyncio.sleep(10)  # 运行10秒
-    finally:
-        await gimbal.stop()
-        controller_task.cancel()
-        try:
-            await controller_task
-        except asyncio.CancelledError:
-            pass
-
-if __name__ == "__main__":
-    asyncio.run(test_gimbal_controller())

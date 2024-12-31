@@ -2,13 +2,12 @@ import asyncio
 import math
 import logging
 from collections import deque
-from typing import Tuple, Optional
+from typing import Optional
 import numpy as np
 from scipy.interpolate import interp1d
 import datetime
 
 from gimbal_controller import GimbalController
-from cyber_gear_motor import CyberGearMotor
 
 logger = logging.getLogger("GimbalAngleReader")
 logger.setLevel(logging.DEBUG)
@@ -36,6 +35,7 @@ class GimbalAngleReader:
         self.record_count = 0
 
     async def start(self):
+        """启动 GimbalAngleReader"""
         self.running = True
         try:
             self.read_task = asyncio.create_task(self._read_loop())
@@ -45,21 +45,20 @@ class GimbalAngleReader:
             await self.stop()
 
     async def stop(self):
+        """停止 GimbalAngleReader"""
         self.running = False
-        try:
-            await self.gimbal_controller.stop()
-        except Exception as e:
-            logger.error(f"停止 GimbalController 时发生错误: {e}")
         if self.read_task:
             self.read_task.cancel()
             try:
                 await self.read_task
+                logger.info("GimbalAngleReader 读取任务已取消。")
             except asyncio.CancelledError:
                 logger.info("GimbalAngleReader 读取任务已取消。")
         logger.info("GimbalAngleReader 已停止。")
 
     async def _read_loop(self):
-        interval = 1.0 / 50.0  # 修改为50Hz
+        """读取角度的主循环"""
+        interval = 1.0 / 50.0  # 50Hz
         while self.running and self.record_count < self.max_records:
             try:
                 current_time = datetime.datetime.now().timestamp()
@@ -119,6 +118,7 @@ class GimbalAngleReader:
             return None
 
     async def _process_and_write(self):
+        """处理并写入角度数据到文件"""
         if len(self.angle_history) == 0:
             logger.warning("无数据可插值")
             return
@@ -152,39 +152,3 @@ class GimbalAngleReader:
     def get_history_data(self) -> list:
         """返回list[dict], 每条dict格式: {timestamp, roll, pitch, yaw} (度数)"""
         return list(self.angle_history)
-
-
-# 测试main
-async def test_gimbal_angle_reader():
-    motor_left = CyberGearMotor(
-        can_id=127,
-        serial_port='COM5',
-        master_id=0x00FD,
-        position_request_interval=1/50  # 修改为50Hz
-    )
-    motor_right = CyberGearMotor(
-        can_id=127,
-        serial_port='COM4',
-        master_id=0x00FD,
-        position_request_interval=1/50  # 修改为50Hz
-    )
-    gimbal_controller = GimbalController(motor_left, motor_right, mode='pitch_random')
-
-    controller_task = asyncio.create_task(gimbal_controller.start())
-    gimbal_angle_reader = GimbalAngleReader(gimbal_controller, max_records=350, output_file="gimbal_angles.txt")  # 修改max_records
-
-    await gimbal_angle_reader.start()
-
-    try:
-        while gimbal_angle_reader.record_count < 350:  # 修改为350
-            await asyncio.sleep(0.02)  # 1/50 sec
-    finally:
-        await gimbal_angle_reader.stop()
-        controller_task.cancel()
-        try:
-            await controller_task
-        except:
-            pass
-
-if __name__ == "__main__":
-    asyncio.run(test_gimbal_angle_reader())
