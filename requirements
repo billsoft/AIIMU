@@ -7,3 +7,4 @@ glfw
 vulkan
 PyOpenGL
 PyOpenGL_accelerate
+vpython

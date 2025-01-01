@@ -9,14 +9,12 @@ stabilizer_opengl.py
 
 import asyncio
 import serial
-import time
 import re
 import math
 import numpy as np
 import glfw
 from OpenGL.GL import *
 from OpenGL.GLU import *
-from ctypes import c_void_p
 from dataclasses import dataclass
 
 # 串口配置
@@ -27,42 +25,53 @@ TIMEOUT = 1  # 串口超时时间（秒）
 # 正则表达式匹配 "AT,yaw,pitch,roll\r\n"
 IMU_PATTERN = re.compile(r"AT,([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)\r?$")
 
+
 @dataclass
 class EulerAngles:
     yaw: float
     pitch: float
     roll: float
 
+
 class KalmanFilter:
     """
     简单的一维卡尔曼滤波器
     """
+
     def __init__(self, process_variance, measurement_variance, initial_estimate=0.0):
         """
         参数:
-        - process_variance: 过程噪声方差
-        - measurement_variance: 测量噪声方差
-        - initial_estimate: 初始估计值
+        - process_variance: 过程噪声方差 (Q)
+        - measurement_variance: 测量噪声方差 (R)
+        - initial_estimate: 初始估计值 (x_0)
         """
-        self.process_variance = process_variance
-        self.measurement_variance = measurement_variance
-        self.estimate = initial_estimate
-        self.error_covariance = 1.0  # 初始误差协方差
+        self.process_variance = process_variance  # Q
+        self.measurement_variance = measurement_variance  # R
+        self.estimate = initial_estimate  # \hat{x}_0
+        self.error_covariance = 1.0  # 初始误差协方差 (P_0)
 
     def update(self, measurement):
         """
         更新卡尔曼滤波器
+        参数:
+        - measurement: 当前测量值 (z_k)
+
+        返回:
+        - 滤波后的估计值 (\hat{x}_k)
         """
         # 预测步骤
-        predicted_estimate = self.estimate
-        predicted_error_covariance = self.error_covariance + self.process_variance
+        predicted_estimate = self.estimate  # \hat{x}_k^- = \hat{x}_{k-1}
+        predicted_error_covariance = self.error_covariance + self.process_variance  # P_k^- = P_{k-1} + Q
 
         # 更新步骤
-        kalman_gain = predicted_error_covariance / (predicted_error_covariance + self.measurement_variance)
-        self.estimate = predicted_estimate + kalman_gain * (measurement - predicted_estimate)
-        self.error_covariance = (1 - kalman_gain) * predicted_error_covariance
+        kalman_gain = predicted_error_covariance / (
+                    predicted_error_covariance + self.measurement_variance)  # K_k = P_k^- / (P_k^- + R)
+        self.estimate = predicted_estimate + kalman_gain * (
+                    measurement - predicted_estimate)  # \hat{x}_k = \hat{x}_k^- + K_k * (z_k - \hat{x}_k^-)
+        self.error_covariance = (1 - kalman_gain) * predicted_error_covariance  # P_k = (1 - K_k) * P_k^-
 
-        return self.estimate
+        return self.estimate  # 返回滤波后的估计值
+
 
 def calculate_compensation(yaw, pitch, roll):
     """
@@ -84,10 +93,12 @@ def calculate_compensation(yaw, pitch, roll):
     compensation_roll = -roll
     return compensation_yaw, compensation_pitch, compensation_roll
 
+
 class IMUVisualizer:
     """
     IMU实时可视化器，使用PyOpenGL和GLFW显示3D长方体的姿态
     """
+
     def __init__(self):
         # 初始化GLFW
         if not glfw.init():
@@ -109,7 +120,7 @@ class IMUVisualizer:
         # 设置视图
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(45, (800/600), 0.1, 50.0)
+        gluPerspective(45, (800 / 600), 0.1, 200.0)  # 增大远近平面以适应更大的模型
         glMatrixMode(GL_MODELVIEW)
 
         # 初始角度
@@ -118,63 +129,95 @@ class IMUVisualizer:
     def update_orientation(self, euler_angles: EulerAngles):
         self.euler_angles = euler_angles
 
+    def draw_axes(self):
+        """
+        绘制坐标轴
+        """
+        glBegin(GL_LINES)
+
+        # X轴 - 红色 (朝左)
+        glColor3f(1, 0, 0)
+        glVertex3f(0, 0, 0)
+        glVertex3f(-60, 0, 0)  # 延长至-60以覆盖长方体的尺寸
+
+        # Y轴 - 绿色 (朝向屏幕内)
+        glColor3f(0, 1, 0)
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, 0, -90)  # 延长至-90以覆盖长方体的尺寸
+
+        # Z轴 - 蓝色 (朝上)
+        glColor3f(0, 0, 1)
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, 90, 0)  # 延长至90以覆盖长方体的尺寸
+
+        glEnd()
+
     def draw_cube(self):
         """
         绘制旋转后的长方体
         """
+        # 清除颜色和深度缓冲
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
         # 移动摄像机
-        glTranslatef(0.0, 0.0, -10.0)
-        # 应用旋转
-        glRotatef(self.euler_angles.yaw, 0, 1, 0)    # Yaw: around Y-axis
-        glRotatef(self.euler_angles.pitch, 1, 0, 0)  # Pitch: around X-axis
-        glRotatef(self.euler_angles.roll, 0, 0, 1)   # Roll: around Z-axis
+        glTranslatef(0.0, -5.0, -150.0)  # 调整摄像机位置，使长方体居中可见
 
-        # 绘制长方体
+        # 应用旋转
+        # 根据定义：
+        # - Yaw绕Z轴旋转（反转方向）
+        # - Pitch绕X轴旋转
+        # - Roll绕Y轴旋转
+        glRotatef(self.euler_angles.pitch, 0, 0, 1)  # pitch 围绕x旋转 红色
+        glRotatef(-self.euler_angles.roll, 1, 0, 0)  # roll 围绕y旋转 绿色
+        glRotatef(-self.euler_angles.yaw, 0, 1, 0)  # yaw 围绕z旋转蓝色
+
+        # 绘制坐标轴
+        self.draw_axes()
+
+        # 绘制长方体（确保以中心为旋转点）
         glBegin(GL_QUADS)
 
-        # 前面
+        # 前面 (+Y)
         glColor3f(1, 0, 0)  # 红色
-        glVertex3f(-1, -0.5,  2)
-        glVertex3f( 1, -0.5,  2)
-        glVertex3f( 1,  0.5,  2)
-        glVertex3f(-1,  0.5,  2)
+        glVertex3f(-25.0, -5.0, 40.0)  # (-width/2, -depth/2, +height/2)
+        glVertex3f(25.0, -5.0, 40.0)
+        glVertex3f(25.0, 5.0, 40.0)
+        glVertex3f(-25.0, 5.0, 40.0)
 
-        # 后面
+        # 后面 (-Y)
         glColor3f(0, 1, 0)  # 绿色
-        glVertex3f(-1, -0.5, -2)
-        glVertex3f( 1, -0.5, -2)
-        glVertex3f( 1,  0.5, -2)
-        glVertex3f(-1,  0.5, -2)
+        glVertex3f(-25.0, -5.0, -40.0)
+        glVertex3f(25.0, -5.0, -40.0)
+        glVertex3f(25.0, 5.0, -40.0)
+        glVertex3f(-25.0, 5.0, -40.0)
 
-        # 左面
+        # 左面 (-X)
         glColor3f(0, 0, 1)  # 蓝色
-        glVertex3f(-1, -0.5, -2)
-        glVertex3f(-1, -0.5,  2)
-        glVertex3f(-1,  0.5,  2)
-        glVertex3f(-1,  0.5, -2)
+        glVertex3f(-25.0, -5.0, -40.0)
+        glVertex3f(-25.0, -5.0, 40.0)
+        glVertex3f(-25.0, 5.0, 40.0)
+        glVertex3f(-25.0, 5.0, -40.0)
 
-        # 右面
+        # 右面 (+X)
         glColor3f(1, 1, 0)  # 黄色
-        glVertex3f(1, -0.5, -2)
-        glVertex3f(1, -0.5,  2)
-        glVertex3f(1,  0.5,  2)
-        glVertex3f(1,  0.5, -2)
+        glVertex3f(25.0, -5.0, -40.0)
+        glVertex3f(25.0, -5.0, 40.0)
+        glVertex3f(25.0, 5.0, 40.0)
+        glVertex3f(25.0, 5.0, -40.0)
 
-        # 上面
+        # 上面 (+Z)
         glColor3f(1, 0, 1)  # 品红色
-        glVertex3f(-1, 0.5,  2)
-        glVertex3f( 1, 0.5,  2)
-        glVertex3f( 1, 0.5, -2)
-        glVertex3f(-1, 0.5, -2)
+        glVertex3f(-25.0, 5.0, 40.0)
+        glVertex3f(25.0, 5.0, 40.0)
+        glVertex3f(25.0, 5.0, -40.0)
+        glVertex3f(-25.0, 5.0, -40.0)
 
-        # 下面
+        # 下面 (-Z)
         glColor3f(0, 1, 1)  # 青色
-        glVertex3f(-1, -0.5,  2)
-        glVertex3f( 1, -0.5,  2)
-        glVertex3f( 1, -0.5, -2)
-        glVertex3f(-1, -0.5, -2)
+        glVertex3f(-25.0, -5.0, 40.0)
+        glVertex3f(25.0, -5.0, 40.0)
+        glVertex3f(25.0, -5.0, -40.0)
+        glVertex3f(-25.0, -5.0, -40.0)
 
         glEnd()
 
@@ -188,6 +231,7 @@ class IMUVisualizer:
 
     def cleanup(self):
         glfw.terminate()
+
 
 async def read_imu_data(yaw_kf, pitch_kf, roll_kf, visualizer):
     """
@@ -210,7 +254,8 @@ async def read_imu_data(yaw_kf, pitch_kf, roll_kf, visualizer):
                         roll = float(match.group(3))
 
                         # 计算补偿值
-                        compensation_yaw, compensation_pitch, compensation_roll = calculate_compensation(yaw, pitch, roll)
+                        compensation_yaw, compensation_pitch, compensation_roll = calculate_compensation(yaw, pitch,
+                                                                                                         roll)
 
                         # 应用卡尔曼滤波器
                         yaw_filtered = yaw_kf.update(yaw)
@@ -223,15 +268,12 @@ async def read_imu_data(yaw_kf, pitch_kf, roll_kf, visualizer):
                         # 更新3D可视化
                         visualizer.update_orientation(euler_angles)
 
-                        # 打印原始欧拉角、补偿值和滤波后的欧拉角
-                        print(f"原始: Yaw={yaw:.2f}, Pitch={pitch:.2f}, Roll={roll:.2f} | "
-                              f"补偿: Yaw={compensation_yaw:.2f}, Pitch={compensation_pitch:.2f}, Roll={compensation_roll:.2f} | "
-                              f"卡尔曼: Yaw={yaw_filtered:.2f}, Pitch={pitch_filtered:.2f}, Roll={roll_filtered:.2f}")
+                        # 已经去掉日志打印
 
                     except ValueError:
                         # 如果转换失败，忽略该行
                         continue
-            await asyncio.sleep(0.001)  # Yield control to the event loop
+            await asyncio.sleep(0.00005)  # 更高的数据读取频率
 
     except serial.SerialException as e:
         print(f"串口错误: {e}")
@@ -241,6 +283,7 @@ async def read_imu_data(yaw_kf, pitch_kf, roll_kf, visualizer):
         if 'ser' in locals() and ser.is_open:
             ser.close()
             print(f"串口 {SERIAL_PORT} 已关闭")
+
 
 async def render_loop(visualizer):
     """
@@ -254,10 +297,11 @@ async def render_loop(visualizer):
             break
         await asyncio.sleep(0.016)  # ~60 FPS
 
+
 async def main():
     # 初始化卡尔曼滤波器，设置过程噪声和测量噪声方差
-    process_var = 1e-5
-    measurement_var = 1e-2
+    process_var = 1e-6  # 调整过程噪声方差以提高响应速度
+    measurement_var = 1e-3  # 调整测量噪声方差以提高响应速度
     yaw_kf = KalmanFilter(process_variance=process_var, measurement_variance=measurement_var)
     pitch_kf = KalmanFilter(process_variance=process_var, measurement_variance=measurement_var)
     roll_kf = KalmanFilter(process_variance=process_var, measurement_variance=measurement_var)
@@ -277,6 +321,7 @@ async def main():
         pass
     finally:
         visualizer.cleanup()
+
 
 if __name__ == "__main__":
     try:
