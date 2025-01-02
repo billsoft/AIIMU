@@ -256,6 +256,7 @@ async def read_imu_data(yaw_kf, pitch_kf, roll_kf, visualizer):
                         # 计算补偿值
                         compensation_yaw, compensation_pitch, compensation_roll = calculate_compensation(yaw, pitch,
                                                                                                          roll)
+                        euler_angles_raw = EulerAngles(yaw=yaw, pitch=pitch, roll=roll)
 
                         # 应用卡尔曼滤波器
                         yaw_filtered = yaw_kf.update(yaw)
@@ -266,7 +267,7 @@ async def read_imu_data(yaw_kf, pitch_kf, roll_kf, visualizer):
                         euler_angles = EulerAngles(yaw=yaw_filtered, pitch=pitch_filtered, roll=roll_filtered)
 
                         # 更新3D可视化
-                        visualizer.update_orientation(euler_angles)
+                        visualizer.update_orientation(euler_angles_raw)
 
                         # 已经去掉日志打印
 
@@ -295,13 +296,13 @@ async def render_loop(visualizer):
             visualizer.poll_events()
         else:
             break
-        await asyncio.sleep(0.016)  # ~60 FPS
+        await asyncio.sleep(0.032)  # ~90 FPS
 
 
 async def main():
     # 初始化卡尔曼滤波器，设置过程噪声和测量噪声方差
-    process_var = 1e-6  # 调整过程噪声方差以提高响应速度
-    measurement_var = 1e-3  # 调整测量噪声方差以提高响应速度
+    process_var = 1e-3  # 调整过程噪声方差以提高响应速度 怎大值是增大响应速度
+    measurement_var = 1e-6  # 调整测量噪声方差以提高响应速度 减小是 增加相应速度
     yaw_kf = KalmanFilter(process_variance=process_var, measurement_variance=measurement_var)
     pitch_kf = KalmanFilter(process_variance=process_var, measurement_variance=measurement_var)
     roll_kf = KalmanFilter(process_variance=process_var, measurement_variance=measurement_var)
