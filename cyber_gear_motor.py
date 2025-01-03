@@ -176,9 +176,9 @@ class CyberGearMotor:
             await self.enable_motor()
 
         await self.set_limit_spd(speed)
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.0001)
         await self.set_loc_ref(position)
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.0001)
         logger.info(f"已发送位置指令：{position} rad")
 
     def degrees_to_radians(self, degrees: float):

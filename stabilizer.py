@@ -2,7 +2,9 @@ import asyncio
 import re
 import math
 import logging
+import time
 from dataclasses import dataclass
+from collections import deque
 from async_serial import AsyncSerial
 from cyber_gear_motor import CyberGearMotor
 
@@ -17,11 +19,12 @@ IMU_PATTERN = re.compile(r"AT,([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?),([+-]?\d
 class EulerAngles:
     yaw: float
     pitch: float
-    roll: float  # 添加 roll 属性
+    roll: float
 
 class Stabilizer:
     """
     云台稳定器类，负责接收IMU数据并控制左右电机以实现稳定。
+    现改进逻辑：将IMU数据与电机控制解耦，通过一个固定频率的协程进行电机控制。
     """
     def __init__(self):
         # 初始化左右电机
@@ -47,28 +50,72 @@ class Stabilizer:
             auto_reset=False  # 禁用自动复位，以便后续手动设置DTR和RTS
         )
 
-        # 控制任务和运行状态
+        # 用于缓存 IMU 最近 1 秒的角度数据（yaw, pitch, roll），并保存对应的时间戳
+        # 注意：maxlen 可以适当设置大一点防止过快写入
+        self.imu_data_buffer = deque(maxlen=1000)  # 每秒500帧的话，最多保留一两秒的数据都可以
+
+        # 用于控制循环的运行状态
         self.running = False
+
+        # 后台协程任务句柄（用于控制更新电机位置的任务）
+        self._stabilizer_task = None
 
     def _on_frame_received(self, frame: bytes):
         """
-        处理接收到的IMU数据帧，将有效数据进行解析并调用稳定控制。
+        处理接收到的IMU数据帧，将有效数据进行解析并缓存。
+        之前的逻辑是直接调用 motor set_position，这里做了解耦和优化，避免过度频繁地设定位置。
         """
         match = IMU_PATTERN.match(frame.decode('utf-8', errors='replace').strip())
         if match:
             try:
+                # 解析并转换成 float
                 yaw, roll, pitch = map(float, match.groups())
-                logger.info(f"Received IMU data: yaw={yaw}, pitch={pitch}, roll={roll}")
-                # 创建一个任务来异步执行稳定控制
-                asyncio.create_task(self._stabilize(yaw, pitch, roll))
+                # 将数据和当前时间戳缓存
+                self.imu_data_buffer.append((time.time(), yaw, pitch, roll))
+
+                logger.debug(f"IMU缓存：yaw={yaw}, pitch={pitch}, roll={roll}, 当前缓存大小={len(self.imu_data_buffer)}")
             except ValueError:
                 logger.error("Invalid IMU data format")
         else:
+            # 如果无法匹配正则
             logger.error("Invalid IMU data format")
+
+    async def _update_stabilizer(self, update_frequency: float = 10.0):
+        """
+        后台协程：每秒 update_frequency 次（默认10Hz），从 IMU 数据缓存中取出最近 1 秒钟的数据，
+        在此基础上做去抖/滤波处理后，再调用 _stabilize 方法控制电机。
+        """
+        interval = 1.0 / update_frequency
+        while self.running:
+            try:
+                # 1) 获取当前时间
+                now = time.time()
+                # 2) 剔除超过 1 秒的历史数据（此处可以按照实际需求调整窗口大小）
+                while self.imu_data_buffer and (now - self.imu_data_buffer[0][0] > 1.0):
+                    self.imu_data_buffer.popleft()
+
+                if len(self.imu_data_buffer) == 0:
+                    # 没有数据就等待下一次
+                    await asyncio.sleep(interval)
+                    continue
+
+                # 3) 对最近 1 秒内的数据进行处理，例如取最新值，或者做平均/中位数滤波
+                # 这里示例：取**最新**一帧数据（也可取平均）
+                latest_timestamp, latest_yaw, latest_pitch, latest_roll = self.imu_data_buffer[-1]
+
+                # 4) 调用稳定控制
+                await self._stabilize(latest_yaw, latest_pitch, latest_roll)
+
+            except Exception as e:
+                logger.error(f"后台稳定控制时发生错误: {e}")
+
+            # 5) 休眠 interval 时间，下一次循环
+            await asyncio.sleep(interval)
 
     async def _stabilize(self, yaw: float, pitch: float, roll: float):
         """
         根据接收到的欧拉角进行稳定控制。
+        保留原有的角度到弧度和电机控制逻辑。
         """
         try:
             # 计算补偿角度
@@ -76,8 +123,8 @@ class Stabilizer:
             pitch_compensation = -pitch
             roll_compensation = -roll
 
-            # 运动角度阈值大于这个阈值云台才纠偏增加惰性放置抖动
-            if abs(pitch_compensation) < 1.5 and abs(roll_compensation) < 1.5:
+            # 运动角度阈值：大于这个阈值云台才纠偏，增加惰性放置抖动
+            if abs(pitch_compensation) < 1.0 and abs(roll_compensation) < 1.0:
                 return
 
             # 计算左右电机的转动角度（弧度）
@@ -85,11 +132,17 @@ class Stabilizer:
                 yaw_compensation, pitch_compensation, roll_compensation
             )
 
-            # 设置电机位置
+            # p控制
+            left_motor_radian *= 0.5
+            right_motor_radian *= 0.5
+
+            # 设置电机位置 (异步并发执行)
             await asyncio.gather(
-                self.motor_left.set_position(left_motor_radian,5.0),
-                self.motor_right.set_position(right_motor_radian,5.0)
+                self.motor_left.set_position(left_motor_radian, 5.0),
+                self.motor_right.set_position(right_motor_radian, 5.0)
             )
+            await asyncio.sleep(0.1)
+
             logger.info(f"设置电机位置: 左={left_motor_radian:.3f} rad, 右={right_motor_radian:.3f} rad")
         except Exception as e:
             logger.error(f"稳定控制时发生错误: {e}")
@@ -121,19 +174,18 @@ class Stabilizer:
             pitch_final = (L - R) / 2
 
         由此推导出：
-           left_motor_angle = roll - (pitch / 2)
-           right_motor_angle = -roll - (pitch / 2)
-        """
-        # 根据补偿角度计算电机角度（单位：度）
-        # left_motor_angle = roll * -1 - (pitch / 2)
-        # right_motor_angle = -roll * -1 - (pitch / 2)
+           left_motor_angle  = pitch - (roll / 2)
+           right_motor_angle = -pitch - (roll / 2)
 
-        L_roll = -roll / 2
-        R_roll = -roll / 2
+        因实际项目结构的需求，暂做如下方式计算（你原先的自定义方案）：
+        """
+        # 这里保留你自定义的计算方法
+        L_roll = -roll #/ 2.0
+        R_roll = -roll #/ 2.0
         L_pitch= -pitch
         R_pitch= pitch
-        left_motor_angle= L_roll + L_pitch
-        right_motor_angle= R_roll + R_pitch
+        left_motor_angle = L_roll + L_pitch
+        right_motor_angle = R_roll + R_pitch
 
         logger.debug(f"计算电机角度前: 左角度={left_motor_angle:.2f}°, 右角度={right_motor_angle:.2f}°")
         left_motor_radian = self.to_radians(left_motor_angle)
@@ -144,7 +196,7 @@ class Stabilizer:
 
     async def start(self):
         """
-        启动稳定器，连接电机并初始化IMU串口。
+        启动稳定器，连接电机并初始化IMU串口，并启动后台稳定控制协程。
         """
         try:
             self.running = True
@@ -181,6 +233,9 @@ class Stabilizer:
                 self.imu_com.transport.serial.rts = False
                 logger.info(f"IMU串口 DTR={self.imu_com.transport.serial.dtr}, RTS={self.imu_com.transport.serial.rts}")
 
+            # 启动后台稳定控制协程，例如默认 10 Hz
+            self._stabilizer_task = asyncio.create_task(self._update_stabilizer(update_frequency=10.0))
+
             logger.info("稳定器已启动并开始处理IMU数据。")
 
         except Exception as e:
@@ -189,13 +244,21 @@ class Stabilizer:
 
     async def stop(self):
         """
-        停止稳定器，关闭电机和串口连接。
+        停止稳定器，关闭电机和串口连接，并取消后台控制协程。
         """
         if not self.running:
             return
 
         self.running = False
         logger.info("正在停止稳定器...")
+
+        # 取消后台协程任务
+        if self._stabilizer_task:
+            self._stabilizer_task.cancel()
+            try:
+                await self._stabilizer_task
+            except asyncio.CancelledError:
+                logger.info("后台稳定控制协程已取消。")
 
         # 关闭IMU串口
         try:
@@ -226,7 +289,6 @@ class Stabilizer:
 
         logger.info("稳定器已停止。")
 
-
 # ----------------- 测试main函数 ------------------ #
 async def main():
     """
@@ -250,3 +312,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("程序已中断。")
+    except Exception as ex:
+        logger.error(f"程序发生错误: {ex}")
