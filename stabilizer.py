@@ -15,16 +15,82 @@ logger = logging.getLogger(__name__)
 # 正则表达式匹配 "AT,yaw,pitch,roll\r\n"
 IMU_PATTERN = re.compile(r"AT,([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)\r?$")
 
+
 @dataclass
 class EulerAngles:
     yaw: float
     pitch: float
     roll: float
 
+
+class OneEuroFilter:
+    """
+    简易的一欧元滤波器示例，用于实时平滑 IMU 数据。
+    你可根据实际情况再进行改进，比如把频率 freq, min_cutoff, beta 等做成可调参。
+    """
+    def __init__(self, freq=20.0, min_cutoff=1.0, beta=0.02, dcutoff=1.0):
+        """
+        freq: 采样频率（与 update_stabilizer 保持一致或相近）
+        min_cutoff: 最小截断频率（越大滤波越“强”，平滑度越高，但延迟也会增大）
+        beta: 帮助控制噪声带来的影响，适当增大可以减小过冲
+        dcutoff: 微分分量的截止频率
+        """
+        self.freq = freq
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.dcutoff = dcutoff
+
+        self.x_prev = None
+        self.dx_prev = 0.0
+        self.last_time = None
+
+    def alpha(self, cutoff):
+        # 一欧元滤波器的 alpha 计算
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        te = 1.0 / self.freq
+        return 1.0 / (1.0 + tau / te)
+
+    def filter(self, x, timestamp=None):
+        # 如果是首次滤波，直接初始化
+        if self.x_prev is None:
+            self.x_prev = x
+            self.last_time = timestamp if timestamp else time.time()
+            return x
+
+        # 计算采样周期
+        if timestamp and self.last_time:
+            elapsed = timestamp - self.last_time
+            if elapsed > 0:
+                self.freq = 1.0 / elapsed  # 动态调整频率(可选)
+            self.last_time = timestamp
+        else:
+            elapsed = 1.0 / self.freq  # 兜底
+
+        # 估计当前导数 dx
+        dx = (x - self.x_prev) * self.freq
+
+        # 对导数做低通滤波
+        ed_cutoff = self.dcutoff
+        ed_alpha = self.alpha(ed_cutoff)
+        dx_hat = ed_alpha * dx + (1 - ed_alpha) * self.dx_prev
+
+        # 动态计算 cutoff
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = self.alpha(cutoff)
+
+        # 最终输出
+        x_hat = a * x + (1 - a) * self.x_prev
+
+        # 更新状态
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        return x_hat
+
+
 class Stabilizer:
     """
     云台稳定器类，负责接收IMU数据并控制左右电机以实现稳定。
-    现改进逻辑：将IMU数据与电机控制解耦，通过一个固定频率的协程进行电机控制。
+    引入一欧元滤波并缩短队列时间窗口，增强实时性和稳定性。
     """
     def __init__(self):
         # 初始化左右电机
@@ -32,14 +98,14 @@ class Stabilizer:
             can_id=127,
             serial_port='COM5',
             master_id=0x00FD,
-            position_request_interval=1
+            position_request_interval=1.0/10.0# 电机 10hz更加当前位置信息
         )
 
         self.motor_right = CyberGearMotor(
             can_id=127,
             serial_port='COM4',
             master_id=0x00FD,
-            position_request_interval=1
+            position_request_interval=1.0/10.0 # 电机 10hz更加当前位置信息
         )
 
         # 初始化IMU串口
@@ -47,118 +113,135 @@ class Stabilizer:
             port='COM11',
             baudrate=921600,
             on_frame_received=self._on_frame_received,
-            auto_reset=False  # 禁用自动复位，以便后续手动设置DTR和RTS
+            auto_reset=False
         )
 
-        # 用于缓存 IMU 最近 1 秒的角度数据（yaw, pitch, roll），并保存对应的时间戳
-        # 注意：maxlen 可以适当设置大一点防止过快写入
-        self.imu_data_buffer = deque(maxlen=1000)  # 每秒500帧的话，最多保留一两秒的数据都可以
+        # 用于缓存 IMU 最近 0.3 秒的角度数据（yaw, pitch, roll），并保存对应的时间戳
+        # 500Hz -> 150 帧左右; 这里 maxlen=200 即可
+        self.imu_data_buffer = deque(maxlen=200)
 
-        # 用于控制循环的运行状态
+        # 控制循环的运行状态
         self.running = False
-
-        # 后台协程任务句柄（用于控制更新电机位置的任务）
+        # 后台协程任务句柄
         self._stabilizer_task = None
+
+        # 为 yaw, pitch, roll 各自建立一欧元滤波器实例
+        # 如果你的 IMU 更新频率非常快，可设置初始化 freq=500; 但实际在 _update_stabilizer 里运行是 ~20Hz
+        self.filter_yaw = OneEuroFilter(freq=20.0, min_cutoff=1.0, beta=0.02)
+        self.filter_pitch = OneEuroFilter(freq=20.0, min_cutoff=1.0, beta=0.02)
+        self.filter_roll = OneEuroFilter(freq=20.0, min_cutoff=1.0, beta=0.02)
 
     def _on_frame_received(self, frame: bytes):
         """
-        处理接收到的IMU数据帧，将有效数据进行解析并缓存。
-        之前的逻辑是直接调用 motor set_position，这里做了解耦和优化，避免过度频繁地设定位置。
+        处理接收到的IMU数据帧，将有效数据进行解析并缓存（仅缓存操作）。
         """
         match = IMU_PATTERN.match(frame.decode('utf-8', errors='replace').strip())
         if match:
             try:
-                # 解析并转换成 float
                 yaw, roll, pitch = map(float, match.groups())
                 # 将数据和当前时间戳缓存
                 self.imu_data_buffer.append((time.time(), yaw, pitch, roll))
 
-                logger.debug(f"IMU缓存：yaw={yaw}, pitch={pitch}, roll={roll}, 当前缓存大小={len(self.imu_data_buffer)}")
+                logger.debug(f"IMU缓存：yaw={yaw}, pitch={pitch}, roll={roll}, 缓存大小={len(self.imu_data_buffer)}")
             except ValueError:
                 logger.error("Invalid IMU data format")
         else:
-            # 如果无法匹配正则
             logger.error("Invalid IMU data format")
 
-    async def _update_stabilizer(self, update_frequency: float = 10.0):
+    async def _update_stabilizer(self, update_frequency: float = 20.0):
         """
-        后台协程：每秒 update_frequency 次（默认10Hz），从 IMU 数据缓存中取出最近 1 秒钟的数据，
-        在此基础上做去抖/滤波处理后，再调用 _stabilize 方法控制电机。
+        后台协程：每秒 update_frequency 次，从 IMU 数据缓存中取出最近 0.3 秒数据，
+        做简单平滑后，再用一欧元滤波进行二次滤波，最后控制电机。
         """
         interval = 1.0 / update_frequency
         while self.running:
             try:
-                # 1) 获取当前时间
                 now = time.time()
-                # 2) 剔除超过 1 秒的历史数据（此处可以按照实际需求调整窗口大小）
-                while self.imu_data_buffer and (now - self.imu_data_buffer[0][0] > 1.0):
+                # 1) 移除超过 0.3 秒之前的数据
+                while self.imu_data_buffer and (now - self.imu_data_buffer[0][0] > 0.3):
                     self.imu_data_buffer.popleft()
 
                 if len(self.imu_data_buffer) == 0:
-                    # 没有数据就等待下一次
+                    # 若无数据，跳过
                     await asyncio.sleep(interval)
                     continue
 
-                # 3) 对最近 1 秒内的数据进行处理，例如取最新值，或者做平均/中位数滤波
-                # 这里示例：取**最新**一帧数据（也可取平均）
-                latest_timestamp, latest_yaw, latest_pitch, latest_roll = self.imu_data_buffer[-1]
+                # 2) 对剩余数据进行一次简单处理，可以取最新值，或平均值
+                #   - 这里示例：取最近 0.1 秒内的数据做平均，以再次平滑噪声
+                #   - 你也可以只取 self.imu_data_buffer[-1] 做最新值
+                sub_data = []
+                threshold_time = now - 0.1  # 取最近 0.1 秒
+                for t, y, p, r in reversed(self.imu_data_buffer):
+                    if t >= threshold_time:
+                        sub_data.append((y, p, r))
+                    else:
+                        break
+
+                if not sub_data:
+                    # 如果 0.1 秒内没有数据，则直接取最后一帧
+                    latest_timestamp, latest_yaw, latest_pitch, latest_roll = self.imu_data_buffer[-1]
+                else:
+                    # 计算平均值
+                    avg_yaw = sum(d[0] for d in sub_data) / len(sub_data)
+                    avg_pitch = sum(d[1] for d in sub_data) / len(sub_data)
+                    avg_roll = sum(d[2] for d in sub_data) / len(sub_data)
+                    latest_timestamp = now
+                    latest_yaw = avg_yaw
+                    latest_pitch = avg_pitch
+                    latest_roll = avg_roll
+
+                # 3) 进行一欧元滤波
+                #    这里将平均后的值再传入滤波器
+                yaw_filtered = self.filter_yaw.filter(latest_yaw, latest_timestamp)
+                pitch_filtered = self.filter_pitch.filter(latest_pitch, latest_timestamp)
+                roll_filtered = self.filter_roll.filter(latest_roll, latest_timestamp)
 
                 # 4) 调用稳定控制
-                await self._stabilize(latest_yaw, latest_pitch, latest_roll)
+                await self._stabilize(yaw_filtered, pitch_filtered, roll_filtered)
 
             except Exception as e:
                 logger.error(f"后台稳定控制时发生错误: {e}")
 
-            # 5) 休眠 interval 时间，下一次循环
+            # 5) 休眠 interval
             await asyncio.sleep(interval)
 
     async def _stabilize(self, yaw: float, pitch: float, roll: float):
         """
         根据接收到的欧拉角进行稳定控制。
-        保留原有的角度到弧度和电机控制逻辑。
+        保留原有的角度到弧度转换、电机控制逻辑，并可根据需要微调p值。
         """
         try:
-            # 计算补偿角度
             yaw_compensation = -yaw
             pitch_compensation = -pitch
             roll_compensation = -roll
 
-            # 运动角度阈值：大于这个阈值云台才纠偏，增加惰性放置抖动
-            if abs(pitch_compensation) < 1.0 and abs(roll_compensation) < 1.0:
+            # 运动角度阈值，避免小抖动反复纠偏
+            if abs(pitch_compensation) < 0.5 and abs(roll_compensation) < 0.5:
                 return
 
-            # 计算左右电机的转动角度（弧度）
             left_motor_radian, right_motor_radian = self._calculate_motor_angles(
                 yaw_compensation, pitch_compensation, roll_compensation
             )
 
-            # p控制
-            left_motor_radian *= 0.5
-            right_motor_radian *= 0.5
+            # 在此可适当加点 P 值，或简单倍乘抑制过冲
+            # left_motor_radian *= 0.8
+            # right_motor_radian *= 0.8
 
-            # 设置电机位置 (异步并发执行)
             await asyncio.gather(
-                self.motor_left.set_position(left_motor_radian, 5.0),
-                self.motor_right.set_position(right_motor_radian, 5.0)
+                self.motor_left.set_position(left_motor_radian, 2.0),
+                self.motor_right.set_position(right_motor_radian, 2.0)
             )
-            await asyncio.sleep(0.1)
 
-            logger.info(f"设置电机位置: 左={left_motor_radian:.3f} rad, 右={right_motor_radian:.3f} rad")
+            logger.info(f"[Stabilize] yaw={yaw:.2f}, pitch={pitch:.2f}, roll={roll:.2f}, "
+                        f"L={left_motor_radian:.3f}rad, R={right_motor_radian:.3f}rad")
         except Exception as e:
             logger.error(f"稳定控制时发生错误: {e}")
 
     def to_radians(self, degrees: float) -> float:
         """
         将角度转换为弧度，并限制在[-0.7, 0.7]范围内。
-
-        参数：
-            degrees (float): 角度值。
-
-        返回：
-            float: 限制在[-0.7, 0.7]范围内的弧度值。
         """
         radians = degrees * math.pi / 180.0
-        # 限制弧度值范围
         if radians > 0.7:
             return 0.7
         elif radians < -0.7:
@@ -167,31 +250,22 @@ class Stabilizer:
 
     def _calculate_motor_angles(self, yaw: float, pitch: float, roll: float):
         """
-        根据补偿的欧拉角计算左右电机的转动角度。
-
-        计算公式基于以下关系：
-            roll_final  = -(L + R)
-            pitch_final = (L - R) / 2
-
-        由此推导出：
-           left_motor_angle  = pitch - (roll / 2)
-           right_motor_angle = -pitch - (roll / 2)
-
-        因实际项目结构的需求，暂做如下方式计算（你原先的自定义方案）：
+        根据补偿的欧拉角计算左右电机的转动角度（单位：度），再转成弧度。
+        保留你的逻辑，只是示例中注释了 /2，具体看你的云台结构。
         """
-        # 这里保留你自定义的计算方法
-        L_roll = -roll #/ 2.0
-        R_roll = -roll #/ 2.0
-        L_pitch= -pitch
-        R_pitch= pitch
+        L_roll = -roll
+        R_roll = -roll
+        L_pitch = -pitch
+        R_pitch = pitch
         left_motor_angle = L_roll + L_pitch
         right_motor_angle = R_roll + R_pitch
 
-        logger.debug(f"计算电机角度前: 左角度={left_motor_angle:.2f}°, 右角度={right_motor_angle:.2f}°")
+        logger.debug(f"[CalcMotorAngles] Before radians: L_angle={left_motor_angle:.2f}°, R_angle={right_motor_angle:.2f}°")
+
         left_motor_radian = self.to_radians(left_motor_angle)
         right_motor_radian = self.to_radians(right_motor_angle)
-        logger.debug(f"计算电机角度后: 左弧度={left_motor_radian:.3f}, 右弧度={right_motor_radian:.3f}")
 
+        logger.debug(f"[CalcMotorAngles] After radians: L={left_motor_radian:.3f}, R={right_motor_radian:.3f}")
         return left_motor_radian, right_motor_radian
 
     async def start(self):
@@ -233,8 +307,8 @@ class Stabilizer:
                 self.imu_com.transport.serial.rts = False
                 logger.info(f"IMU串口 DTR={self.imu_com.transport.serial.dtr}, RTS={self.imu_com.transport.serial.rts}")
 
-            # 启动后台稳定控制协程，例如默认 10 Hz
-            self._stabilizer_task = asyncio.create_task(self._update_stabilizer(update_frequency=10.0))
+            # 启动后台稳定控制协程，比如 20 Hz
+            self._stabilizer_task = asyncio.create_task(self._update_stabilizer(update_frequency=20.0))
 
             logger.info("稳定器已启动并开始处理IMU数据。")
 
@@ -289,7 +363,8 @@ class Stabilizer:
 
         logger.info("稳定器已停止。")
 
-# ----------------- 测试main函数 ------------------ #
+
+# ----------------- 测试 main 函数 ------------------ #
 async def main():
     """
     测试稳定器的主函数，启动稳定器，运行直到用户中断。
