@@ -29,14 +29,14 @@ class Stabilizer:
             can_id=127,
             serial_port='COM5',
             master_id=0x00FD,
-            position_request_interval=1 / 50  # 设置为50Hz
+            position_request_interval=1
         )
 
         self.motor_right = CyberGearMotor(
             can_id=127,
             serial_port='COM4',
             master_id=0x00FD,
-            position_request_interval=1 / 50  # 设置为50Hz
+            position_request_interval=1
         )
 
         # 初始化IMU串口
@@ -57,7 +57,7 @@ class Stabilizer:
         match = IMU_PATTERN.match(frame.decode('utf-8', errors='replace').strip())
         if match:
             try:
-                yaw, pitch, roll = map(float, match.groups())
+                yaw, roll, pitch = map(float, match.groups())
                 logger.info(f"Received IMU data: yaw={yaw}, pitch={pitch}, roll={roll}")
                 # 创建一个任务来异步执行稳定控制
                 asyncio.create_task(self._stabilize(yaw, pitch, roll))
@@ -76,19 +76,19 @@ class Stabilizer:
             pitch_compensation = -pitch
             roll_compensation = -roll
 
+            # 运动角度阈值大于这个阈值云台才纠偏增加惰性放置抖动
+            if abs(pitch_compensation) < 1.5 and abs(roll_compensation) < 1.5:
+                return
+
             # 计算左右电机的转动角度（弧度）
             left_motor_radian, right_motor_radian = self._calculate_motor_angles(
                 yaw_compensation, pitch_compensation, roll_compensation
             )
 
-            # # 增大位置命令的幅度（可根据实际需求调整）
-            # left_motor_radian *= 2
-            # right_motor_radian *= 2
-
             # 设置电机位置
             await asyncio.gather(
-                self.motor_left.set_position(left_motor_radian),
-                self.motor_right.set_position(right_motor_radian)
+                self.motor_left.set_position(left_motor_radian,5.0),
+                self.motor_right.set_position(right_motor_radian,5.0)
             )
             logger.info(f"设置电机位置: 左={left_motor_radian:.3f} rad, 右={right_motor_radian:.3f} rad")
         except Exception as e:
@@ -125,8 +125,15 @@ class Stabilizer:
            right_motor_angle = -roll - (pitch / 2)
         """
         # 根据补偿角度计算电机角度（单位：度）
-        left_motor_angle = roll * -1 - (pitch / 2)
-        right_motor_angle = -roll * -1 - (pitch / 2)
+        # left_motor_angle = roll * -1 - (pitch / 2)
+        # right_motor_angle = -roll * -1 - (pitch / 2)
+
+        L_roll = -roll / 2
+        R_roll = -roll / 2
+        L_pitch= -pitch
+        R_pitch= pitch
+        left_motor_angle= L_roll + L_pitch
+        right_motor_angle= R_roll + R_pitch
 
         logger.debug(f"计算电机角度前: 左角度={left_motor_angle:.2f}°, 右角度={right_motor_angle:.2f}°")
         left_motor_radian = self.to_radians(left_motor_angle)
@@ -163,18 +170,6 @@ class Stabilizer:
                 self.motor_right.set_zero_position()
             )
             logger.info("已设置电机零位。")
-
-            # 设置电机控制模式为位置控制模式（假设 CyberGearMotor 提供 set_control_mode 方法）
-            try:
-                await asyncio.gather(
-                    self.motor_left.set_control_mode('position'),
-                    self.motor_right.set_control_mode('position')
-                )
-                logger.info("已设置电机控制模式为位置控制模式。")
-            except AttributeError:
-                logger.warning("CyberGearMotor 类没有 set_control_mode 方法，跳过设置控制模式。")
-            except Exception as e:
-                logger.error(f"设置电机控制模式时发生错误: {e}")
 
             # 连接IMU串口
             await self.imu_com.connect()
